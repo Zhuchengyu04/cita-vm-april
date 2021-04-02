@@ -366,88 +366,94 @@ impl<B: DB> State<B> {
             })
             .collect::<Vec<(Vec<u8>, Vec<u8>)>>();
 
-        //add vc
-        let kv_size = key_values.len();
+    //     //add vc
+    //     let kv_size = key_values.len();
 
-        let per_pos_size = 2;
-        let l = block_number;
-        let n = kv_size;
-        const slices_num: i32 = 4;
-        // let mut rng = ChaChaRng::from_seed(l);
-        let mut values: Vec<String> = Vec::with_capacity(n);
-        // let mut slice_values:Vec<Vec<String>> = vec![vec![String::new()]];
-        let mut slice_value_0: Vec<String> = vec![String::from("0")];
-        let mut slice_value_1: Vec<String> = vec![String::from("0")];
-        let mut slice_value_2: Vec<String> = vec![String::from("0")];
-        let mut slice_value_3: Vec<String> = vec![String::from("0")];
+    //     let per_pos_size = 2;
+    //     let l = block_number;
+    //     let n = kv_size;
+    //     const slices_num: i32 = 4;
+    //     // let mut rng = ChaChaRng::from_seed(l);
+    //     let mut values: Vec<String> = Vec::with_capacity(n);
+    //     // let mut slice_values:Vec<Vec<String>> = vec![vec![String::new()]];
+    //     let mut slice_value_0: Vec<String> = vec![String::from("0")];
+    //     let mut slice_value_1: Vec<String> = vec![String::from("0")];
+    //     let mut slice_value_2: Vec<String> = vec![String::from("0")];
+    //     let mut slice_value_3: Vec<String> = vec![String::from("0")];
 
-        let mut slice_map = HashMap::new();
+    //     let mut slice_map = HashMap::new();
 
-        slice_map.insert(0, slice_value_0.clone());
-        slice_map.insert(1, slice_value_1.clone());
-        slice_map.insert(2, slice_value_2.clone());
-        slice_map.insert(3, slice_value_3.clone());
+    //     slice_map.insert(0, slice_value_0.clone());
+    //     slice_map.insert(1, slice_value_1.clone());
+    //     slice_map.insert(2, slice_value_2.clone());
+    //     slice_map.insert(3, slice_value_3.clone());
 
-        for (key, value) in key_values.into_iter() {
-            let mut k = *(key.get(key.len() - 1).unwrap());
-            k &= 0b0000_0011;
+    //     for (key, value) in key_values.into_iter() {
+    //         let mut k = *(key.get(key.len() - 1).unwrap());
+    //         k &= 0b0000_0011;
 
-            let remains = k as usize;
-            let strs = format!("{}{}", String::from_utf8_lossy(&key), String::from_utf8_lossy(&value));
-            trie.insert(key.clone(), value.clone())?;
-            // values.push(strs);
-            slice_map.get_mut(&remains).unwrap().push(strs.clone());
-        }
-        let mut sub_commitments:Vec<String> = Vec::with_capacity(4);
-        let (tx, rx) = mpsc::channel();
+    //         let remains = k as usize;
+    //         let strs = format!("{}{}", String::from_utf8_lossy(&key), String::from_utf8_lossy(&value));
+    //         trie.insert(key.clone(), value.clone())?;
+    //         // values.push(strs);
+    //         slice_map.get_mut(&remains).unwrap().push(strs.clone());
+    //     }
+    //     let mut sub_commitments:Vec<String> = Vec::with_capacity(4);
+    //     let (tx, rx) = mpsc::channel();
 
-        let mut threads = vec![];
+    //     let mut threads = vec![];
 
-        for i in 0..(3) {
-            // let maps = slice_map.clone();
-            let sizes = (slice_map.get(&i).unwrap().len() as u32);
-            let sub_value = slice_map.get(&i).unwrap().clone();
-            let sends = mpsc::Sender::clone(&tx);
-            let t = thread::spawn(move || {
-                // create_vc_commitment(
-                //     &format!("123456789012345678901234567890{}-{}", l.to_string(), i.to_string()),
-                //     0,
-                //     sizes,
-                //     &slice_map.clone().get(&i).unwrap(),
-                //     &mut sub_commitments[i.clone() as usize],
-                // )
-                let seed = format!("1234567890123456789012345678901{}-{}", l.to_string(), i.to_string());
-                let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, 0, sizes as usize).unwrap();
-                let state_commitment = Commitment::new(&prover_params, &sub_value).unwrap();
-                let mut commitment_bytes: Vec<u8> = vec![];
-                state_commitment.serialize(&mut commitment_bytes, true);
-                sends.send((i,format!("{:?}", String::from_utf8(commitment_bytes)))).unwrap();
+    //     for i in 0..(3) {
+    //         // let maps = slice_map.clone();
+    //         let sizes = (slice_map.get(&i).unwrap().len() as u32);
+    //         let sub_value = slice_map.get(&i).unwrap().clone();
+    //         let sends = mpsc::Sender::clone(&tx);
+    //         let t = thread::spawn(move || {
+    //             // create_vc_commitment(
+    //             //     &format!("123456789012345678901234567890{}-{}", l.to_string(), i.to_string()),
+    //             //     0,
+    //             //     sizes,
+    //             //     &slice_map.clone().get(&i).unwrap(),
+    //             //     &mut sub_commitments[i.clone() as usize],
+    //             // )
+    //             let seed = format!("1234567890123456789012345678901{}-{}", l.to_string(), i.to_string());
+    //             let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, 0, sizes as usize).unwrap();
+    //             let state_commitment = Commitment::new(&prover_params, &sub_value).unwrap();
+    //             let mut commitment_bytes: Vec<u8> = vec![];
+    //             state_commitment.serialize(&mut commitment_bytes, true);
+    //             sends.send((i,format!("{:?}", String::from_utf8(commitment_bytes)))).unwrap();
                 
-            });
-            threads.push(t);
-        }
-        let (mut all_prover_params, all_verifier_params) =
-            paramgen_from_seed(format!("1234567890123456789012345678901{}", l.to_string()), 0, 4).unwrap();
-        all_prover_params.precomp_256();
-        for t in threads {
-            t.join().unwrap();
-        }
+    //         });
+    //         threads.push(t);
+    //     }
+    //     let (mut all_prover_params, all_verifier_params) =
+    //         paramgen_from_seed(format!("1234567890123456789012345678901{}", l.to_string()), 0, 4).unwrap();
+    //     all_prover_params.precomp_256();
+    //     for t in threads {
+    //         t.join().unwrap();
+    //     }
 
-        let mut all_sub_commitment:Vec<String> = vec!["0".to_string();4];
-        for received in rx {
-            // println!("Got: {}", received);
-            all_sub_commitment[received.0] = received.1;
-            println!("{}",&all_sub_commitment[received.0]);
-        }
+    //     let mut all_sub_commitment:Vec<String> = vec!["0".to_string();4];
+    //     for received in rx {
+    //         // println!("Got: {}", received);
+    //         all_sub_commitment[received.0] = received.1;
+    //         println!("{}",&all_sub_commitment[received.0]);
+    //     }
 
-        // format!("{}{}{}{}", sub_commitments_0,sub_commitments_1,sub_commitments_2,sub_commitments_3);
-        let  state_commitment = Commitment::new(&all_prover_params, &all_sub_commitment).unwrap();
-        let mut commitment_bytes: Vec<u8> = vec![];
-        assert!(state_commitment.serialize(&mut commitment_bytes, true).is_ok());
-        let res = &commitment_bytes;
-        println!("all:{:?}",String::from_utf8(res.to_vec()));
-        self.root = From::from(&trie.root()?[..]);
-        self.db.flush().or_else(|e| Err(Error::DB(format!("{}", e))))
+    //     // format!("{}{}{}{}", sub_commitments_0,sub_commitments_1,sub_commitments_2,sub_commitments_3);
+    //     let  state_commitment = Commitment::new(&all_prover_params, &all_sub_commitment).unwrap();
+    //     let mut commitment_bytes: Vec<u8> = vec![];
+    //     assert!(state_commitment.serialize(&mut commitment_bytes, true).is_ok());
+    //     let res = &commitment_bytes;
+    //     println!("all:{:?}",String::from_utf8(res.to_vec()));
+    //     self.root = From::from(&trie.root()?[..]);
+    //     self.db.flush().or_else(|e| Err(Error::DB(format!("{}", e))))
+    for (key, value) in key_values.into_iter() {
+        trie.insert(key, value)?;
+    }
+
+    self.root = From::from(&trie.root()?[..]);
+    self.db.flush().or_else(|e| Err(Error::DB(format!("{}", e))))
     }
 
     /// Create a recoverable checkpoint of this state. Return the checkpoint index.
