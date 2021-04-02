@@ -1,0 +1,24 @@
+language: rust
+rust:
+  - stable
+stages:
+  - Check
+  - Test
+jobs:
+  include:
+    - stage: Check
+      name: Format
+      script:
+        - rustup component add rustfmt
+        - cargo fmt --all -- --check
+    - stage: Check
+      name: Clippy
+      script:
+        - rustup component add clippy
+        - RUSTFLAGS='-F warnings' cargo clippy --all --tests --all-targets
+    - stage: Test
+      name: Test
+      script:
+        - make evm/testdata
+        - make riscv/all
+        - cargo test
