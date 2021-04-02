@@ -739,8 +739,8 @@ impl<B: DB + 'static> Executive<B> {
         )
     }
 
-    pub fn commit(&self) -> Result<H256, Error> {
-        self.state_provider.borrow_mut().commit()?;
+    pub fn commit(&self, block_number: u64) -> Result<H256, Error> {
+        self.state_provider.borrow_mut().commit(block_number)?;
         Ok(self.state_provider.borrow_mut().root)
     }
 }

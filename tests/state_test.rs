@@ -38,7 +38,7 @@ fn test_json_file(p: &str) {
                     state_provider.set_storage(&address, kk, vv).unwrap();
                 }
             }
-            state_provider.commit().unwrap();
+            state_provider.commit(0).unwrap();
 
             let idx_gas = &postdata.indexes[&String::from("gas")];
             let idx_value = &postdata.indexes[&String::from("value")];

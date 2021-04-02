@@ -199,7 +199,7 @@ fn bench_new_contract(bench: &mut Bencher) {
         println!("10000 Tx: Executing tx: {:?}", SystemTime::now().duration_since(tic));
 
         let tic = SystemTime::now();
-        vm.executor.state_provider.borrow_mut().commit().unwrap();
+        vm.executor.state_provider.borrow_mut().commit(0).unwrap();
         println!("10000 Tx: Commiting tx: {:?}", SystemTime::now().duration_since(tic));
     })
 }
@@ -252,7 +252,7 @@ fn bench_erc20(bench: &mut Bencher) {
         println!("10000 Tx: Executing tx: {:?}", SystemTime::now().duration_since(tic));
 
         let tic = SystemTime::now();
-        vm.executor.state_provider.borrow_mut().commit().unwrap();
+        vm.executor.state_provider.borrow_mut().commit(0).unwrap();
         println!("10000 Tx: Commiting tx: {:?}", SystemTime::now().duration_since(tic));
     })
 }
