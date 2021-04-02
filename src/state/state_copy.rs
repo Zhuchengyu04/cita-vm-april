@@ -12,7 +12,6 @@ use log::debug;
 use rayon::prelude::{IntoParallelRefMutIterator, ParallelIterator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json as ser;
-//use std::str::FromStr;
 extern crate num_bigint;
 extern crate num_integer;
 extern crate num_traits;
@@ -33,34 +32,19 @@ use pairing::serdes::SerDes;
 use pointproofs::pairings::param::paramgen_from_seed;
 use pointproofs::pairings::*;
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaChaRng;
-
-const PREFIX_LEN: usize = 12;
-const LATEST_ERA_KEY: [u8; PREFIX_LEN] = [b'l', b'a', b's', b't', 0, 0, 0, 0, 0, 0, 0, 0];
-
-/// State is the one who managers all accounts and states in Ethereum's system.
+use rand_chacha::ChaChaRng;/// State is the one who managers all accounts and states in Ethereum's system.
 pub struct State<B> {
     pub db: Arc<B>,
     pub root: H256,
     pub cache: RefCell<HashMap<Address, StateObjectEntry>>,
-    /// Checkpoints are used to revert to history
+    /// Checkpoints are used to revert to history.
     pub checkpoints: RefCell<Vec<HashMap<Address, Option<StateObjectEntry>>>>,
-    //add vc
-    // pub vc_commitment: H256,
 }
-// pub fn create_vc_commitment(seed: &String, ciphersuite: u8, slice_num: u32, values: &Vec<String>, com: &mut String) {
-//     let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, ciphersuite, slice_num as usize).unwrap();
-//     let state_commitment = Commitment::new(&prover_params, values).unwrap();
-//     let mut commitment_bytes: Vec<u8> = vec![];
-//     state_commitment.serialize(&mut commitment_bytes, true);
-//     *com = format!("{:?}", String::from_utf8(commitment_bytes));
-// }
 
 impl<B: DB> State<B> {
     /// Creates empty state for test.
     pub fn new(db: Arc<B>) -> Result<State<B>, Error> {
         let mut trie = PatriciaTrie::new(Arc::clone(&db), Arc::new(hash::get_hasher()));
-        //let mut trie = PatriciaTrie::new(Arc::clone(&db), Arc::new(hash::HasherNull::new()));
         let root = trie.root()?;
 
         Ok(State {
@@ -68,8 +52,6 @@ impl<B: DB> State<B> {
             root: From::from(&root[..]),
             cache: RefCell::new(HashMap::new()),
             checkpoints: RefCell::new(Vec::new()),
-            //add vc
-            // vc_commitment: H256::from(0),
         })
     }
 
@@ -78,24 +60,21 @@ impl<B: DB> State<B> {
         if !db.contains(&root.0[..]).or_else(|e| Err(Error::DB(format!("{}", e))))? {
             return Err(Error::NotFound);
         }
-        // This for compatible with cita 0.x,no need to update it
-        // For state test,this should be removed
-        if root == common::hash::RLP_NULL {
-            db.insert(LATEST_ERA_KEY.to_vec(), [0x80].to_vec()).unwrap();
-        }
         Ok(State {
             db,
             root,
             cache: RefCell::new(HashMap::new()),
             checkpoints: RefCell::new(Vec::new()),
-            //add vc
-            // vc_commitment: H256::from(0),
         })
     }
 
     /// Create a contract account with code or not
     /// Overwrite the code if the contract already exists
     pub fn new_contract(&mut self, contract: &Address, balance: U256, nonce: U256, code: Vec<u8>) -> StateObject {
+        debug!(
+            "state.new_contract contract={:?} balance={:?}, nonce={:?} code={:?}",
+            contract, balance, nonce, code
+        );
         let mut state_object = StateObject::new(balance, nonce);
         state_object.init_code(code);
 
@@ -105,6 +84,7 @@ impl<B: DB> State<B> {
 
     /// Kill a contract.
     pub fn kill_contract(&mut self, contract: &Address) {
+        debug!("state.kill_contract contract={:?}", contract);
         self.insert_cache(contract, StateObjectEntry::new_dirty(None));
     }
 
@@ -144,12 +124,10 @@ impl<B: DB> State<B> {
             }
         }
         let trie = PatriciaTrie::from(Arc::clone(&self.db), Arc::new(hash::get_hasher()), &self.root.0)?;
-        match trie.get(&address[..])? {
+        match trie.get(common::hash::summary(&address[..]).as_slice())? {
             Some(rlp) => {
                 let mut state_object = StateObject::from_rlp(&rlp)?;
-                let accdb = Arc::new(AccountDB::new(*address, self.db.clone()));
-                state_object.read_code(accdb.clone())?;
-                state_object.read_abi(accdb)?;
+                state_object.read_code(self.db.clone())?;
                 self.insert_cache(address, StateObjectEntry::new_clean(Some(state_object.clone_clean())));
                 Ok(f(Some(&state_object)))
             }
@@ -165,13 +143,10 @@ impl<B: DB> State<B> {
             }
         }
         let trie = PatriciaTrie::from(Arc::clone(&self.db), Arc::new(hash::get_hasher()), &self.root.0)?;
-
-        //match trie.get(common::hash::summary(&address[..]).as_slice())? {
-        match trie.get(&address[..])? {
+        match trie.get(common::hash::summary(&address[..]).as_slice())? {
             Some(rlp) => {
                 let mut state_object = StateObject::from_rlp(&rlp)?;
                 state_object.read_code(self.db.clone())?;
-                state_object.read_abi(self.db.clone())?;
                 self.insert_cache(address, StateObjectEntry::new_clean(Some(state_object.clone_clean())));
                 Ok(Some(state_object))
             }
@@ -193,7 +168,6 @@ impl<B: DB> State<B> {
     /// Get the merkle proof for a given account.
     pub fn get_account_proof(&self, address: &Address) -> Result<Vec<Vec<u8>>, Error> {
         let trie = PatriciaTrie::from(Arc::clone(&self.db), Arc::new(hash::get_hasher()), &self.root.0)?;
-        //let trie = PatriciaTrie::from(Arc::clone(&self.db), Arc::new(hash::HasherNull::new()), &self.root.0)?;
         let proof = trie.get_proof(common::hash::summary(&address[..]).as_slice())?;
         Ok(proof)
     }
@@ -251,22 +225,16 @@ impl<B: DB> State<B> {
 
     /// Set code for an account.
     pub fn set_code(&mut self, address: &Address, code: Vec<u8>) -> Result<(), Error> {
+        debug!("state.set_code address={:?} code={:?}", address, code);
         let mut state_object = self.get_state_object_or_default(address)?;
         state_object.init_code(code);
         self.insert_cache(address, StateObjectEntry::new_dirty(Some(state_object)));
         Ok(())
     }
 
-    /// Set abi for an account.
-    pub fn set_abi(&mut self, address: &Address, abi: Vec<u8>) -> Result<(), Error> {
-        let mut state_object = self.get_state_object_or_default(address)?;
-        state_object.init_abi(abi);
-        self.insert_cache(address, StateObjectEntry::new_dirty(Some(state_object)));
-        Ok(())
-    }
-
     /// Add balance by incr for an account.
     pub fn add_balance(&mut self, address: &Address, incr: U256) -> Result<(), Error> {
+        debug!("state.add_balance a={:?} incr={:?}", address, incr);
         if incr.is_zero() {
             return Ok(());
         }
@@ -281,6 +249,7 @@ impl<B: DB> State<B> {
 
     /// Sub balance by decr for an account.
     pub fn sub_balance(&mut self, a: &Address, decr: U256) -> Result<(), Error> {
+        debug!("state.sub_balance a={:?} decr={:?}", a, decr);
         if decr.is_zero() {
             return Ok(());
         }
@@ -302,6 +271,7 @@ impl<B: DB> State<B> {
 
     /// Increase nonce for an account.
     pub fn inc_nonce(&mut self, address: &Address) -> Result<(), Error> {
+        debug!("state.inc_nonce a={:?}", address);
         let mut state_object = self.get_state_object_or_default(address)?;
         state_object.inc_nonce();
         self.insert_cache(address, StateObjectEntry::new_dirty(Some(state_object)));
@@ -469,6 +439,7 @@ impl<B: DB> State<B> {
 
     /// Merge last checkpoint with previous.
     pub fn discard_checkpoint(&mut self) {
+        debug!("state.discard_checkpoint");
         let last = self.checkpoints.borrow_mut().pop();
         if let Some(mut checkpoint) = last {
             if let Some(prev) = self.checkpoints.borrow_mut().last_mut() {
@@ -524,12 +495,6 @@ pub trait StateObjectInfo {
     fn code_hash(&mut self, a: &Address) -> Result<H256, Error>;
 
     fn code_size(&mut self, a: &Address) -> Result<usize, Error>;
-
-    fn abi(&mut self, a: &Address) -> Result<Vec<u8>, Error>;
-
-    fn abi_hash(&mut self, a: &Address) -> Result<H256, Error>;
-
-    fn abi_size(&mut self, a: &Address) -> Result<usize, Error>;
 }
 
 impl<B: DB> StateObjectInfo for State<B> {
@@ -565,18 +530,6 @@ impl<B: DB> StateObjectInfo for State<B> {
     fn code_size(&mut self, address: &Address) -> Result<usize, Error> {
         self.call_with_cached(address, |a| Ok(a.map_or(0, |e| e.code_size)))?
     }
-
-    fn abi(&mut self, address: &Address) -> Result<Vec<u8>, Error> {
-        self.call_with_cached(address, |a| Ok(a.map_or(vec![], |e| e.abi.clone())))?
-    }
-
-    fn abi_hash(&mut self, address: &Address) -> Result<H256, Error> {
-        self.call_with_cached(address, |a| Ok(a.map_or(H256::zero(), |e| e.abi_hash)))?
-    }
-
-    fn abi_size(&mut self, address: &Address) -> Result<usize, Error> {
-        self.call_with_cached(address, |a| Ok(a.map_or(0, |e| e.abi_size)))?
-    }
 }
 
 #[cfg(test)]
@@ -602,7 +555,7 @@ mod tests {
                 "0xf1885eda54b7a053318cd41e2093220dab15d65381b1157a3633a83bfd5c9239".into()
             );
             assert_eq!(state.code_size(&a).unwrap(), 3);
-            state.commit(1).unwrap();
+            state.commit(0).unwrap();
             assert_eq!(state.code(&a).unwrap(), vec![1, 2, 3]);
             assert_eq!(
                 state.code_hash(&a).unwrap(),
@@ -622,37 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn test_abi_from_database() {
-        let a = Address::zero();
-        let (root, db) = {
-            let mut state = get_temp_state();
-            state.set_abi(&a, vec![1, 2, 3]).unwrap();
-            assert_eq!(state.abi(&a).unwrap(), vec![1, 2, 3]);
-            assert_eq!(
-                state.abi_hash(&a).unwrap(),
-                "0xf1885eda54b7a053318cd41e2093220dab15d65381b1157a3633a83bfd5c9239".into()
-            );
-            assert_eq!(state.abi_size(&a).unwrap(), 3);
-            state.commit(1).unwrap();
-            assert_eq!(state.abi(&a).unwrap(), vec![1, 2, 3]);
-            assert_eq!(
-                state.abi_hash(&a).unwrap(),
-                "0xf1885eda54b7a053318cd41e2093220dab15d65381b1157a3633a83bfd5c9239".into()
-            );
-            assert_eq!(state.abi_size(&a).unwrap(), 3);
-            (state.root, state.db)
-        };
-
-        let mut state = State::from_existing(db, root).unwrap();
-        assert_eq!(state.abi(&a).unwrap(), vec![1, 2, 3]);
-        assert_eq!(
-            state.abi_hash(&a).unwrap(),
-            "0xf1885eda54b7a053318cd41e2093220dab15d65381b1157a3633a83bfd5c9239".into()
-        );
-        assert_eq!(state.abi_size(&a).unwrap(), 3);
-    }
-
-    #[test]
     fn get_storage_from_datebase() {
         let a = Address::zero();
         let (root, db) = {
@@ -660,7 +582,7 @@ mod tests {
             state
                 .set_storage(&a, H256::from(&U256::from(1u64)), H256::from(&U256::from(69u64)))
                 .unwrap();
-            state.commit(1).unwrap();
+            state.commit(0).unwrap();
             (state.root, state.db)
         };
 
@@ -678,7 +600,7 @@ mod tests {
             let mut state = get_temp_state();
             state.inc_nonce(&a).unwrap();
             state.add_balance(&a, U256::from(69u64)).unwrap();
-            state.commit(1).unwrap();
+            state.commit(0).unwrap();
             assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
             assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
             (state.root, state.db)
@@ -708,7 +630,7 @@ mod tests {
         let (root, db) = {
             let mut state = get_temp_state();
             state.add_balance(&a, U256::from(69u64)).unwrap();
-            state.commit(1).unwrap();
+            state.commit(0).unwrap();
             (state.root, state.db)
         };
 
@@ -717,7 +639,7 @@ mod tests {
             assert_eq!(state.exist(&a).unwrap(), true);
             assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
             state.kill_contract(&a);
-            state.commit(1).unwrap();
+            state.commit(0).unwrap();
             assert_eq!(state.exist(&a).unwrap(), false);
             assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
             (state.root, state.db)
@@ -736,17 +658,18 @@ mod tests {
 
         state.add_balance(&a, U256::from(69u64)).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
 
         state.sub_balance(&a, U256::from(42u64)).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(27u64));
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(27u64));
+
         state.transfer_balance(&a, &b, U256::from(18)).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(9u64));
         assert_eq!(state.balance(&b).unwrap(), U256::from(18u64));
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(9u64));
         assert_eq!(state.balance(&b).unwrap(), U256::from(18u64));
     }
@@ -759,11 +682,11 @@ mod tests {
         assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
         state.inc_nonce(&a).unwrap();
         assert_eq!(state.nonce(&a).unwrap(), U256::from(2u64));
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.nonce(&a).unwrap(), U256::from(2u64));
         state.inc_nonce(&a).unwrap();
         assert_eq!(state.nonce(&a).unwrap(), U256::from(3u64));
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.nonce(&a).unwrap(), U256::from(3u64));
     }
 
@@ -773,7 +696,7 @@ mod tests {
         let a = Address::zero();
         assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
         assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
-        state.commit(11).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
         assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
     }
@@ -783,10 +706,10 @@ mod tests {
         let mut state = get_temp_state();
         let a = Address::zero();
         state.new_contract(&a, U256::from(0u64), U256::from(0u64), vec![]);
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(
             state.root,
-            "530acecc6ec873396bb3e90b6578161f9688ed7eeeb93d6fba5684895a93b78a".into()
+            "0ce23f3c809de377b008a4a3ee94a0834aac8bec1f86e28ffe4fdb5a15b0c785".into()
         );
     }
 
@@ -864,7 +787,7 @@ mod tests {
         state.discard_checkpoint(); // discard c2
         state.revert_checkpoint(); // revert to c1
         assert_eq!(state.exist(&a).unwrap(), false);
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(orig_root, state.root);
     }
 
@@ -875,7 +798,7 @@ mod tests {
         let k = H256::from(U256::from(0));
 
         state.set_storage(&a, k, H256::from(U256::from(0xffff))).unwrap();
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         state.clear();
 
         let orig_root = state.root;
@@ -891,7 +814,7 @@ mod tests {
         state.revert_checkpoint(); // revert to c1
         assert_eq!(state.get_storage(&a, &k).unwrap(), H256::from(U256::from(0xffff)));
 
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(orig_root, state.root);
     }
 
@@ -906,7 +829,7 @@ mod tests {
         assert_eq!(state.code(&a).unwrap(), vec![10u8, 20, 30, 40, 50]);
         assert_eq!(state.balance(&a).unwrap(), 10.into());
         assert_eq!(state.get_storage(&a, &10.into()).unwrap(), 10.into());
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         let orig_root = state.root;
 
         // Top         => account_a: balance=8, nonce=0, code=[10, 20, 30, 40, 50],
@@ -949,7 +872,7 @@ mod tests {
         assert_eq!(state.balance(&a).unwrap(), 10.into());
         assert_eq!(state.get_storage(&a, &10.into()).unwrap(), 10.into());
 
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
         assert_eq!(orig_root, state.root);
     }
 
@@ -959,7 +882,7 @@ mod tests {
         let a: Address = 1000.into();
         let b: Address = 2000.into();
         state.new_contract(&a, 5.into(), 0.into(), vec![10u8, 20, 30, 40, 50]);
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
 
         // The state only contains one account, should be a single leaf node, therefore the proof
         // length is 1
@@ -983,7 +906,7 @@ mod tests {
         state.new_contract(&a, 5.into(), 0.into(), vec![10u8, 20, 30, 40, 50]);
         state.set_storage(&a, 10.into(), 10.into()).unwrap();
         state.new_contract(&b, 5.into(), 0.into(), vec![10u8, 20, 30, 40, 50]);
-        state.commit(1).unwrap();
+        state.commit(0).unwrap();
 
         // account not exist
         let proof = state.get_storage_proof(&c, &10.into()).unwrap();
@@ -1002,47 +925,5 @@ mod tests {
         assert_eq!(proof2.len(), 1);
 
         assert_eq!(proof1, proof2);
-    }
-
-    #[test]
-    fn create_empty() {
-        let mut state = get_temp_state();
-        state.commit(1).unwrap();
-
-        #[cfg(feature = "sha3hash")]
-        let expected = "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421";
-        #[cfg(feature = "blake2bhash")]
-        let expected = "c14af59107ef14003e4697a40ea912d865eb1463086a4649977c13ea69b0d9af";
-        #[cfg(feature = "sm3hash")]
-        let expected = "995b949869f80fa1465a9d8b6fa759ec65c3020d59c2624662bdff059bdf19b3";
-
-        assert_eq!(state.root, expected.into());
-    }
-
-    #[test]
-    fn generate_vc() {
-        let lambda = 128;
-        let n = 1024;
-        let mut rng = ChaChaRng::from_seed([0u8; 32]);
-
-        let ph = Rc::new(PrimeHash::init(64));
-
-        let config = Config { lambda, n, ph };
-        let mut vc = BinaryVectorCommitment::<Accumulator>::setup::<RSAGroup, _>(&mut rng, &config);
-
-        let mut val: Vec<bool> = (0..64).map(|_| rng.gen()).collect();
-        // set two bits manually, to make checks easier
-        val[2] = true;
-        val[3] = false;
-
-        vc.commit(&val);
-
-        // open a set bit
-        let comm = vc.open(&true, 2);
-        assert!(vc.verify(&true, 2, &comm), "invalid commitment (bit set)");
-
-        // open a set bit
-        let comm = vc.open(&false, 3);
-        assert!(vc.verify(&false, 3, &comm), "invalid commitment (bit not set)");
     }
 }
