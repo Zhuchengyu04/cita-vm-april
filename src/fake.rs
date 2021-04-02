@@ -21,7 +21,7 @@ impl FakeVM {
         let mut state = state::State::new(db.clone()).unwrap();
         state.new_contract(&account1, U256::from(100_000_000_000u64), U256::from(1), vec![]);
         state.new_contract(&account2, U256::from(200_000_000_000u64), U256::from(1), vec![]);
-        state.commit(0).unwrap();
+        state.commit().unwrap();
 
         let block_data_provider: Arc<dyn BlockDataProvider> = Arc::new(BlockDataProviderMock::default());
 

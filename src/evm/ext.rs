@@ -1,8 +1,8 @@
 use ethereum_types::{Address, H256, U256};
 
-use crate::evm::err::Error;
-use crate::evm::opcodes::OpCode;
-use crate::{InterpreterParams, InterpreterResult};
+use crate::evm::err;
+use crate::evm::interpreter;
+use crate::evm::opcodes;
 
 pub trait DataProvider {
     fn get_balance(&self, address: &Address) -> U256;
@@ -27,6 +27,7 @@ pub trait DataProvider {
     // is_empty returns whether the given account is empty. Empty
     // is defined according to EIP161 (balance = nonce = code = 0).
     fn is_empty(&self, address: &Address) -> bool;
+    fn exist(&self, address: &Address) -> bool;
 
     // call is a low-level function for
     //   OpCode::CALL
@@ -35,5 +36,9 @@ pub trait DataProvider {
     //   OpCode::STATICCALL
     //   OpCode::CREATE
     //   OpCode::CREATE2
-    fn call(&self, opcode: OpCode, params: InterpreterParams) -> Result<InterpreterResult, Error>;
+    fn call(
+        &self,
+        opcode: opcodes::OpCode,
+        params: interpreter::InterpreterParams,
+    ) -> Result<interpreter::InterpreterResult, err::Error>;
 }

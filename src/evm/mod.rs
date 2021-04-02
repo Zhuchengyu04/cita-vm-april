@@ -1,21 +1,13 @@
-mod common;
-
+pub mod common;
 mod err;
-pub use err::Error;
-
 mod ext;
-pub use ext::DataProvider;
-
 pub mod extmock;
-
 mod interpreter;
-pub use interpreter::{Interpreter, InterpreterConf};
-
 mod memory;
-
-pub mod native;
-
 mod opcodes;
-pub use opcodes::OpCode;
-
 mod stack;
+
+pub use err::Error;
+pub use ext::DataProvider;
+pub use interpreter::{Context, Contract, Interpreter, InterpreterConf, InterpreterParams, InterpreterResult, Log};
+pub use opcodes::OpCode;

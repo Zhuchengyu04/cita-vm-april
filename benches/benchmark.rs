@@ -1,29 +1,49 @@
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use bencher::{benchmark_group, benchmark_main, Bencher};
-use ethereum_types::U256;
+use ethereum_types::{Address, U256};
 
 fn wrapper(bench: &mut Bencher, code: &str, data: &str) {
-    let vm = cita_vm::FakeVM::new();
-    vm.executor
-        .state_provider
-        .borrow_mut()
-        .set_code(&vm.account2, hex::decode(code).unwrap())
-        .unwrap();
+    let db = Arc::new(cita_vm::state::MemoryDB::new(false));
+    let mut state = cita_vm::state::State::new(db).unwrap();
+    state.new_contract(
+        &Address::from("0xBd770416a3345F91E4B34576cb804a576fa48EB1"),
+        U256::from(10),
+        U256::from(1),
+        hex::decode(code).unwrap(),
+    );
+    state.new_contract(
+        &Address::from("0x1000000000000000000000000000000000000000"),
+        U256::from(1_000_000_000_000_000u64),
+        U256::from(1),
+        vec![],
+    );
+    let block_data_provider = Arc::new(cita_vm::BlockDataProviderMock::default());
+    let state_data_provider = Arc::new(RefCell::new(state));
+    let context = cita_vm::evm::Context::default();
+    let config = cita_vm::Config::default();
 
     let mut tx = cita_vm::Transaction {
-        from: vm.account1,
-        to: Some(vm.account2),
+        from: Address::from("0x1000000000000000000000000000000000000000"),
+        to: Some(Address::from("0xBd770416a3345F91E4B34576cb804a576fa48EB1")),
         value: U256::from(0),
         nonce: U256::from(1),
         gas_limit: 80000,
         gas_price: U256::from(1),
         input: hex::decode(data).unwrap(),
-        itype: cita_vm::InterpreterType::EVM,
     };
 
     bench.iter(|| {
-        vm.executor.exec(cita_vm::Context::default(), tx.clone()).unwrap();
+        cita_vm::exec(
+            block_data_provider.clone(),
+            state_data_provider.clone(),
+            context.clone(),
+            config.clone(),
+            tx.clone(),
+        )
+        .unwrap();
         tx.nonce += U256::one();
     });
 }
@@ -173,25 +193,42 @@ const ERC20_CODE: &str = "606060405234620000005760405162001617380380620016178339
                           00000000000000000000000000000000";
 
 fn bench_new_contract(bench: &mut Bencher) {
-    let vm = cita_vm::FakeVM::new();
+    let db = Arc::new(cita_vm::state::MemoryDB::new(false));
+    let mut state = cita_vm::state::State::new(db).unwrap();
+    let address0 = Address::from("0x1000000000000000000000000000000000000000");
+    let address1 = Address::from("0x1000000000000000000000000000000000000001");
+
+    state.new_contract(&address0, U256::from(100_000_000_000_000_000u64), U256::from(1), vec![]);
+    state.new_contract(&address1, U256::from(100_000_000_000_000_000u64), U256::from(1), vec![]);
+
+    let block_data_provider: Arc<dyn cita_vm::BlockDataProvider> = Arc::new(cita_vm::BlockDataProviderMock::default());
+    let state_data_provider = Arc::new(RefCell::new(state));
+    let context = cita_vm::evm::Context::default();
+    let config = cita_vm::Config::default();
     let mut nonce = 1;
 
     bench.iter(|| {
         let tic = SystemTime::now();
         for _ in 0..10000 {
             let tx = cita_vm::Transaction {
-                from: vm.account1,
+                from: address0,
                 to: None,
                 value: U256::from(0),
                 nonce: U256::from(nonce),
                 gas_limit: 8_000_000,
                 gas_price: U256::from(1),
                 input: hex::decode(ERC20_CODE).unwrap(),
-                itype: cita_vm::InterpreterType::EVM,
             };
-            let r = vm.executor.exec(cita_vm::Context::default(), tx.clone()).unwrap();
+            let r = cita_vm::exec(
+                block_data_provider.clone(),
+                state_data_provider.clone(),
+                context.clone(),
+                config.clone(),
+                tx,
+            )
+            .unwrap();
             match r {
-                cita_vm::InterpreterResult::Create(_, _, _, address) => address,
+                cita_vm::evm::InterpreterResult::Create(_, _, _, address) => address,
                 _ => panic!("error"),
             };
             nonce += 1;
@@ -199,28 +236,45 @@ fn bench_new_contract(bench: &mut Bencher) {
         println!("10000 Tx: Executing tx: {:?}", SystemTime::now().duration_since(tic));
 
         let tic = SystemTime::now();
-        vm.executor.state_provider.borrow_mut().commit(0).unwrap();
+        state_data_provider.borrow_mut().commit().unwrap();
         println!("10000 Tx: Commiting tx: {:?}", SystemTime::now().duration_since(tic));
     })
 }
 
 fn bench_erc20(bench: &mut Bencher) {
-    let vm = cita_vm::FakeVM::new();
+    let db = Arc::new(cita_vm::state::MemoryDB::new(false));
+    let mut state = cita_vm::state::State::new(db).unwrap();
+    let address0 = Address::from("0x1000000000000000000000000000000000000000");
+    let address1 = Address::from("0x1000000000000000000000000000000000000001");
+
+    state.new_contract(&address0, U256::from(100_000_000_000_000_000u64), U256::from(1), vec![]);
+    state.new_contract(&address1, U256::from(100_000_000_000_000_000u64), U256::from(1), vec![]);
+
+    let block_data_provider: Arc<dyn cita_vm::BlockDataProvider> = Arc::new(cita_vm::BlockDataProviderMock::default());
+    let state_data_provider = Arc::new(RefCell::new(state));
+    let context = cita_vm::evm::Context::default();
+    let config = cita_vm::Config::default();
     let mut nonce = 1;
 
     let tx = cita_vm::Transaction {
-        from: vm.account1,
+        from: address0,
         to: None,
         value: U256::from(0),
         nonce: U256::from(nonce),
         gas_limit: 8_000_000,
         gas_price: U256::from(1),
         input: hex::decode(ERC20_CODE).unwrap(),
-        itype: cita_vm::InterpreterType::EVM,
     };
-    let r = vm.executor.exec(cita_vm::Context::default(), tx).unwrap();
+    let r = cita_vm::exec(
+        block_data_provider.clone(),
+        state_data_provider.clone(),
+        context.clone(),
+        config.clone(),
+        tx,
+    )
+    .unwrap();
     let contract = match r {
-        cita_vm::InterpreterResult::Create(_, _, _, address) => address,
+        cita_vm::evm::InterpreterResult::Create(_, _, _, address) => address,
         _ => panic!("error"),
     };
     nonce += 1;
@@ -230,7 +284,7 @@ fn bench_erc20(bench: &mut Bencher) {
         for _ in 0..10000 {
             // Transfer value
             let tx = cita_vm::Transaction {
-                from: vm.account1,
+                from: address0,
                 to: Some(contract),
                 value: U256::from(0),
                 nonce: U256::from(nonce),
@@ -240,11 +294,13 @@ fn bench_erc20(bench: &mut Bencher) {
         "a9059cbb0000000000000000000000001000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000a",
                 )
                 .unwrap(),
-                itype: cita_vm::InterpreterType::EVM,
             };
-            vm.executor.exec(
-                cita_vm::Context::default(),
-                tx.clone(),
+            cita_vm::exec(
+                block_data_provider.clone(),
+                state_data_provider.clone(),
+                context.clone(),
+                config.clone(),
+                tx,
             )
             .unwrap();
             nonce += 1;
@@ -252,7 +308,7 @@ fn bench_erc20(bench: &mut Bencher) {
         println!("10000 Tx: Executing tx: {:?}", SystemTime::now().duration_since(tic));
 
         let tic = SystemTime::now();
-        vm.executor.state_provider.borrow_mut().commit(0).unwrap();
+        state_data_provider.borrow_mut().commit().unwrap();
         println!("10000 Tx: Commiting tx: {:?}", SystemTime::now().duration_since(tic));
     })
 }

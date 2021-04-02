@@ -1,17 +1,42 @@
 use std::cmp;
 
-use ethereum_types::{H256, U256, U512};
+use ethereum_types::{Address, H256, U256, U512};
+use log::debug;
 
 use crate::evm::common;
-use crate::evm::ext::DataProvider;
-use crate::evm::memory::Memory;
-use crate::evm::stack::Stack;
-use crate::evm::Error;
-use crate::evm::OpCode;
-use crate::{Context, InterpreterParams, InterpreterResult, Log};
+use crate::evm::err;
+use crate::evm::ext;
+use crate::evm::memory;
+use crate::evm::opcodes;
+use crate::evm::stack;
+
+#[derive(Clone, Debug, Default)]
+pub struct Context {
+    pub gas_limit: u64,
+    pub coinbase: Address,
+    pub number: U256,
+    pub timestamp: u64,
+    pub difficulty: U256,
+}
+
+// Log is the data struct for LOG0...LOG4.
+// The members are "Address: Address, Topics: Vec<H256>, Body: Vec<u8>"
+#[derive(Clone, Debug)]
+pub struct Log(pub Address, pub Vec<H256>, pub Vec<u8>);
+
+#[derive(Clone, Debug)]
+pub enum InterpreterResult {
+    // Return data, remain gas, logs.
+    Normal(Vec<u8>, u64, Vec<Log>),
+    // Return data, remain gas
+    Revert(Vec<u8>, u64),
+    // Return data, remain gas, logs, contract address
+    Create(Vec<u8>, u64, Vec<Log>, Address),
+}
 
 #[derive(Clone, Debug)]
 pub struct InterpreterConf {
+    pub no_empty: bool,
     pub eip1283: bool,
     pub stack_limit: u64,
     pub max_create_code_size: u64, // See: https://github.com/ethereum/EIPs/issues/659
@@ -51,6 +76,8 @@ pub struct InterpreterConf {
     pub gas_call_new_account: u64, // Paid for a CALL operation which creates an account
     pub gas_self_destruct_new_account: u64, // Paid for a SELFDESTRUCT operation which creates an account
     pub gas_ext_code_hash: u64, // Piad for a EXTCODEHASH operation. http://eips.ethereum.org/EIPS/eip-1052
+    pub gas_chain_id: u64,     // istanbul,eip155
+    pub gas_self_balance: u64, // istanbul
 }
 
 impl Default for InterpreterConf {
@@ -60,19 +87,20 @@ impl Default for InterpreterConf {
     // If you want to step through the steps, let the
     fn default() -> Self {
         InterpreterConf {
+            no_empty: false,
             eip1283: false,
             stack_limit: 1024,
-            max_create_code_size: 24567,
+            max_create_code_size: std::u64::MAX,
             max_call_depth: 1024,
 
             gas_tier_step: [0, 2, 3, 5, 8, 10, 20, 0],
             gas_exp: 10,
-            gas_exp_byte: 50,
+            gas_exp_byte: 10, //50,
             gas_sha3: 30,
             gas_sha3_word: 6,
-            gas_balance: 400,
+            gas_balance: 20, //400,
             gas_memory: 3,
-            gas_sload: 200,
+            gas_sload: 50, //200,
             gas_sstore_noop: 200,
             gas_sstore_init: 20000,
             gas_sstore_clear_refund: 15000,
@@ -90,28 +118,57 @@ impl Default for InterpreterConf {
             gas_create: 32000,
             gas_jumpdest: 1,
             gas_copy: 3,
-            gas_call: 700,
+            gas_call: 40, //700,
             gas_call_value_transfer: 9000,
             gas_call_stipend: 2300,
-            gas_self_destruct: 5000,
+            gas_self_destruct: 0, //5000,
             gas_self_destruct_refund: 24000,
-            gas_extcode: 700,
+            gas_extcode: 20, //700,
             gas_call_new_account: 25000,
-            gas_self_destruct_new_account: 25000,
+            gas_self_destruct_new_account: 0, //25000,
             gas_ext_code_hash: 400,
+            gas_chain_id: 2,
+            gas_self_balance: 5,
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Contract {
+    pub code_address: Address,
+    pub code_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InterpreterParams {
+    pub origin: Address,   // Who send the transaction
+    pub sender: Address,   // Who send the call
+    pub receiver: Address, // Who receive the transaction or call
+    pub address: Address,  // Which storage used
+
+    pub value: U256,
+    pub input: Vec<u8>,
+    pub nonce: U256,
+    pub gas_limit: u64,
+    pub gas_price: U256,
+
+    pub read_only: bool,
+    pub contract: Contract,
+    pub extra: H256,
+    pub is_create: bool,
+    pub disable_transfer_value: bool,
+    pub depth: u64,
 }
 
 pub struct Interpreter {
     pub context: Context,
     pub cfg: InterpreterConf,
-    pub data_provider: Box<dyn DataProvider>,
+    pub data_provider: Box<dyn ext::DataProvider>,
     pub params: InterpreterParams,
 
     gas: u64,
-    stack: Stack<U256>,
-    mem: Memory,
+    stack: stack::Stack<U256>,
+    mem: memory::Memory,
     logs: Vec<Log>,
     return_data: Vec<u8>,
     mem_gas: u64,
@@ -122,7 +179,7 @@ impl Interpreter {
     pub fn new(
         context: Context,
         cfg: InterpreterConf,
-        data_provider: Box<dyn DataProvider>,
+        data_provider: Box<dyn ext::DataProvider>,
         params: InterpreterParams,
     ) -> Self {
         let gas = params.gas_limit;
@@ -132,8 +189,8 @@ impl Interpreter {
             data_provider,
             params,
             gas,
-            stack: Stack::with_capacity(1024),
-            mem: Memory::default(),
+            stack: stack::Stack::with_capacity(1024),
+            mem: memory::Memory::default(),
             logs: Vec::new(),
             return_data: Vec::new(),
             mem_gas: 0,
@@ -142,7 +199,7 @@ impl Interpreter {
     }
 
     #[allow(clippy::cognitive_complexity)]
-    pub fn run(&mut self) -> Result<InterpreterResult, Error> {
+    pub fn run(&mut self) -> Result<InterpreterResult, err::Error> {
         let mut pc = 0;
         while let Some(op) = self.get_op(pc)? {
             pc += 1;
@@ -151,53 +208,60 @@ impl Interpreter {
             // Ensure stack
             let stack_require = op.stack_require();
             if !self.stack.require(stack_require as usize) {
-                return Err(Error::OutOfStack);
+                return Err(err::Error::StackUnderflow);
             }
             if self.stack.len() as u64 - op.stack_require() + op.stack_returns() > self.cfg.stack_limit {
-                return Err(Error::OutOfStack);
+                return Err(err::Error::OutOfStack);
             }
             // Ensure no state changes in static call
             if self.params.read_only && op.state_changes() {
-                return Err(Error::MutableCallInStaticContext);
+                return Err(err::Error::MutableCallInStaticContext);
             }
             // Gas cost and mem expand.
             let op_gas = self.cfg.gas_tier_step[op.gas_price_tier().idx()];
             self.use_gas(op_gas)?;
             match op {
-                OpCode::EXP => {
+                opcodes::OpCode::EXP => {
                     let expon = self.stack.back(1);
                     let bytes = ((expon.bits() + 7) / 8) as u64;
                     let gas = self.cfg.gas_exp + self.cfg.gas_exp_byte * bytes;
                     self.use_gas(gas)?;
                 }
-                OpCode::SHA3 => {
+                opcodes::OpCode::SHA3 => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(1);
                     self.mem_gas_work(mem_offset, mem_len)?;
                     self.use_gas(self.cfg.gas_sha3)?;
                     self.use_gas(common::to_word_size(mem_len.low_u64()) * self.cfg.gas_sha3_word)?;
                 }
-                OpCode::BALANCE => {
+                opcodes::OpCode::BALANCE => {
                     self.use_gas(self.cfg.gas_balance)?;
                 }
-                OpCode::CALLDATACOPY => {
+                opcodes::OpCode::SELFBALANCE => {
+                    self.use_gas(self.cfg.gas_self_balance)?;
+                }
+                opcodes::OpCode::CHAINID => {
+                    self.use_gas(self.cfg.gas_chain_id)?;
+                }
+                opcodes::OpCode::CALLDATACOPY => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(2);
                     self.mem_gas_work(mem_offset, mem_len)?;
                     let gas = common::to_word_size(mem_len.low_u64()) * self.cfg.gas_copy;
                     self.use_gas(gas)?;
                 }
-                OpCode::CODECOPY => {
+                opcodes::OpCode::CODECOPY => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(2);
+
                     self.mem_gas_work(mem_offset, mem_len)?;
                     let gas = common::to_word_size(mem_len.low_u64()) * self.cfg.gas_copy;
                     self.use_gas(gas)?;
                 }
-                OpCode::EXTCODESIZE => {
+                opcodes::OpCode::EXTCODESIZE => {
                     self.use_gas(self.cfg.gas_extcode)?;
                 }
-                OpCode::EXTCODECOPY => {
+                opcodes::OpCode::EXTCODECOPY => {
                     let mem_offset = self.stack.back(1);
                     let mem_len = self.stack.back(3);
                     self.use_gas(self.cfg.gas_extcode)?;
@@ -205,10 +269,10 @@ impl Interpreter {
                     let gas = common::to_word_size(mem_len.low_u64()) * self.cfg.gas_copy;
                     self.use_gas(gas)?;
                 }
-                OpCode::EXTCODEHASH => {
+                opcodes::OpCode::EXTCODEHASH => {
                     self.use_gas(self.cfg.gas_ext_code_hash)?;
                 }
-                OpCode::RETURNDATACOPY => {
+                opcodes::OpCode::RETURNDATACOPY => {
                     let mem_offset = self.stack.back(0);
                     let size = self.stack.back(2);
                     self.mem_gas_work(mem_offset, size)?;
@@ -216,29 +280,30 @@ impl Interpreter {
                     let gas = common::to_word_size(size_min) * self.cfg.gas_copy;
                     self.use_gas(gas)?;
                 }
-                OpCode::MLOAD => {
+                opcodes::OpCode::MLOAD => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = U256::from(32);
                     self.mem_gas_work(mem_offset, mem_len)?;
                 }
-                OpCode::MSTORE => {
+                opcodes::OpCode::MSTORE => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = U256::from(32);
                     self.mem_gas_work(mem_offset, mem_len)?;
                 }
-                OpCode::MSTORE8 => {
+                opcodes::OpCode::MSTORE8 => {
                     let mem_offset = self.stack.back(0);
                     self.mem_gas_work(mem_offset, U256::one())?;
                 }
-                OpCode::SLOAD => {
+                opcodes::OpCode::SLOAD => {
                     self.use_gas(self.cfg.gas_sload)?;
                 }
-                OpCode::SSTORE => {
+                opcodes::OpCode::SSTORE => {
                     let address = H256::from(&self.stack.back(0));
                     let current_value = U256::from(&*self.data_provider.get_storage(&self.params.address, &address));
                     let new_value = self.stack.back(1);
                     let original_value =
                         U256::from(&*self.data_provider.get_storage_origin(&self.params.address, &address));
+
                     let gas: u64 = {
                         if self.cfg.eip1283 {
                             // See https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1283.md
@@ -287,11 +352,15 @@ impl Interpreter {
                     };
                     self.use_gas(gas)?;
                 }
-                OpCode::JUMPDEST => {
+                opcodes::OpCode::JUMPDEST => {
                     self.use_gas(self.cfg.gas_jumpdest)?;
                 }
-                OpCode::LOG0 | OpCode::LOG1 | OpCode::LOG2 | OpCode::LOG3 | OpCode::LOG4 => {
-                    let n = op.clone() as u8 - OpCode::LOG0 as u8;
+                opcodes::OpCode::LOG0
+                | opcodes::OpCode::LOG1
+                | opcodes::OpCode::LOG2
+                | opcodes::OpCode::LOG3
+                | opcodes::OpCode::LOG4 => {
+                    let n = op.clone() as u8 - opcodes::OpCode::LOG0 as u8;
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(1);
                     self.mem_gas_work(mem_offset, mem_len)?;
@@ -300,18 +369,18 @@ impl Interpreter {
                         + self.cfg.gas_log_data * mem_len.low_u64();
                     self.use_gas(gas)?;
                 }
-                OpCode::CREATE => {
+                opcodes::OpCode::CREATE => {
                     let mem_offset = self.stack.back(1);
                     let mem_len = self.stack.back(2);
                     if mem_len > U256::from(self.cfg.max_create_code_size) {
-                        return Err(Error::ExccedMaxCodeSize);
+                        return Err(err::Error::ExccedMaxCodeSize);
                     }
                     self.mem_gas_work(mem_offset, mem_len)?;
                     self.use_gas(self.cfg.gas_create)?;
                     self.gas_tmp = self.gas - self.gas / 64;
                     self.use_gas(self.gas_tmp)?;
                 }
-                OpCode::CALL | OpCode::CALLCODE => {
+                opcodes::OpCode::CALL | opcodes::OpCode::CALLCODE => {
                     let gas_req = self.stack.back(0);
                     let address = common::u256_to_address(&self.stack.back(1));
                     let value = self.stack.back(2);
@@ -321,9 +390,12 @@ impl Interpreter {
                     let out_len = self.stack.back(6);
 
                     self.use_gas(self.cfg.gas_call)?;
-
                     let is_value_transfer = !value.is_zero();
-                    if op == OpCode::CALL && is_value_transfer && self.data_provider.is_empty(&address) {
+
+                    if op == opcodes::OpCode::CALL
+                        && (!self.cfg.no_empty && !self.data_provider.exist(&address)
+                            || (self.cfg.no_empty && is_value_transfer && self.data_provider.is_empty(&address)))
+                    {
                         self.use_gas(self.cfg.gas_call_new_account)?;
                     }
                     if is_value_transfer {
@@ -334,12 +406,12 @@ impl Interpreter {
                     self.gas_tmp = cmp::min(self.gas - self.gas / 64, gas_req.low_u64());
                     self.use_gas(self.gas_tmp)?;
                 }
-                OpCode::RETURN => {
+                opcodes::OpCode::RETURN => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(1);
                     self.mem_gas_work(mem_offset, mem_len)?;
                 }
-                OpCode::DELEGATECALL | OpCode::STATICCALL => {
+                opcodes::OpCode::DELEGATECALL | opcodes::OpCode::STATICCALL => {
                     let gas_req = self.stack.back(0);
                     let mem_offset = self.stack.back(2);
                     let mem_len = self.stack.back(3);
@@ -351,11 +423,11 @@ impl Interpreter {
                     self.gas_tmp = cmp::min(self.gas - self.gas / 64, gas_req.low_u64());
                     self.use_gas(self.gas_tmp)?;
                 }
-                OpCode::CREATE2 => {
+                opcodes::OpCode::CREATE2 => {
                     let mem_offset = self.stack.back(1);
                     let mem_len = self.stack.back(2);
                     if mem_len > U256::from(self.cfg.max_create_code_size) {
-                        return Err(Error::ExccedMaxCodeSize);
+                        return Err(err::Error::ExccedMaxCodeSize);
                     }
                     self.mem_gas_work(mem_offset, mem_len)?;
                     self.use_gas(self.cfg.gas_create)?;
@@ -363,12 +435,12 @@ impl Interpreter {
                     self.gas_tmp = self.gas - self.gas / 64;
                     self.use_gas(self.gas_tmp)?;
                 }
-                OpCode::REVERT => {
+                opcodes::OpCode::REVERT => {
                     let mem_offset = self.stack.back(0);
                     let mem_len = self.stack.back(1);
                     self.mem_gas_work(mem_offset, mem_len)?;
                 }
-                OpCode::SELFDESTRUCT => {
+                opcodes::OpCode::SELFDESTRUCT => {
                     let address = self.stack.peek();
                     self.use_gas(self.cfg.gas_self_destruct)?;
                     if !self.data_provider.get_balance(&self.params.address).is_zero()
@@ -383,28 +455,28 @@ impl Interpreter {
             }
             // Step 5: Let's dance!
             match op {
-                OpCode::STOP => break,
-                OpCode::ADD => {
+                opcodes::OpCode::STOP => break,
+                opcodes::OpCode::ADD => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a.overflowing_add(b).0);
                 }
-                OpCode::MUL => {
+                opcodes::OpCode::MUL => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a.overflowing_mul(b).0);
                 }
-                OpCode::SUB => {
+                opcodes::OpCode::SUB => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a.overflowing_sub(b).0);
                 }
-                OpCode::DIV => {
+                opcodes::OpCode::DIV => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(if b.is_zero() { U256::zero() } else { a / b })
                 }
-                OpCode::SDIV => {
+                opcodes::OpCode::SDIV => {
                     let (a, neg_a) = common::get_sign(self.stack.pop());
                     let (b, neg_b) = common::get_sign(self.stack.pop());
                     let min = (U256::one() << 255) - U256::one();
@@ -416,12 +488,12 @@ impl Interpreter {
                         common::set_sign(a / b, neg_a ^ neg_b)
                     })
                 }
-                OpCode::MOD => {
+                opcodes::OpCode::MOD => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(if !b.is_zero() { a % b } else { U256::zero() });
                 }
-                OpCode::SMOD => {
+                opcodes::OpCode::SMOD => {
                     let ua = self.stack.pop();
                     let ub = self.stack.pop();
                     let (a, sign_a) = common::get_sign(ua);
@@ -433,7 +505,7 @@ impl Interpreter {
                         U256::zero()
                     });
                 }
-                OpCode::ADDMOD => {
+                opcodes::OpCode::ADDMOD => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     let c = self.stack.pop();
@@ -446,7 +518,7 @@ impl Interpreter {
                         U256::zero()
                     });
                 }
-                OpCode::MULMOD => {
+                opcodes::OpCode::MULMOD => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     let c = self.stack.pop();
@@ -459,13 +531,13 @@ impl Interpreter {
                         U256::zero()
                     });
                 }
-                OpCode::EXP => {
+                opcodes::OpCode::EXP => {
                     let base = self.stack.pop();
                     let expon = self.stack.pop();
                     let res = base.overflowing_pow(expon).0;
                     self.stack.push(res);
                 }
-                OpCode::SIGNEXTEND => {
+                opcodes::OpCode::SIGNEXTEND => {
                     let bit = self.stack.pop();
                     if bit < U256::from(32) {
                         let number = self.stack.pop();
@@ -475,17 +547,17 @@ impl Interpreter {
                         self.stack.push(if bit { number | !mask } else { number & mask });
                     }
                 }
-                OpCode::LT => {
+                opcodes::OpCode::LT => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(common::bool_to_u256(a < b));
                 }
-                OpCode::GT => {
+                opcodes::OpCode::GT => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(common::bool_to_u256(a > b));
                 }
-                OpCode::SLT => {
+                opcodes::OpCode::SLT => {
                     let (a, neg_a) = common::get_sign(self.stack.pop());
                     let (b, neg_b) = common::get_sign(self.stack.pop());
                     let is_positive_lt = a < b && !(neg_a | neg_b);
@@ -495,7 +567,7 @@ impl Interpreter {
                         is_positive_lt | is_negative_lt | has_different_signs,
                     ));
                 }
-                OpCode::SGT => {
+                opcodes::OpCode::SGT => {
                     let (a, neg_a) = common::get_sign(self.stack.pop());
                     let (b, neg_b) = common::get_sign(self.stack.pop());
                     let is_positive_gt = a > b && !(neg_a | neg_b);
@@ -505,35 +577,35 @@ impl Interpreter {
                         is_positive_gt | is_negative_gt | has_different_signs,
                     ));
                 }
-                OpCode::EQ => {
+                opcodes::OpCode::EQ => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(common::bool_to_u256(a == b));
                 }
-                OpCode::ISZERO => {
+                opcodes::OpCode::ISZERO => {
                     let a = self.stack.pop();
                     self.stack.push(common::bool_to_u256(a.is_zero()));
                 }
-                OpCode::AND => {
+                opcodes::OpCode::AND => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a & b);
                 }
-                OpCode::OR => {
+                opcodes::OpCode::OR => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a | b);
                 }
-                OpCode::XOR => {
+                opcodes::OpCode::XOR => {
                     let a = self.stack.pop();
                     let b = self.stack.pop();
                     self.stack.push(a ^ b);
                 }
-                OpCode::NOT => {
+                opcodes::OpCode::NOT => {
                     let a = self.stack.pop();
                     self.stack.push(!a);
                 }
-                OpCode::BYTE => {
+                opcodes::OpCode::BYTE => {
                     let word = self.stack.pop();
                     let val = self.stack.pop();
                     let byte = if word < U256::from(32) {
@@ -543,7 +615,7 @@ impl Interpreter {
                     };
                     self.stack.push(byte);
                 }
-                OpCode::SHL => {
+                opcodes::OpCode::SHL => {
                     const CONST_256: U256 = U256([256, 0, 0, 0]);
                     let shift = self.stack.pop();
                     let value = self.stack.pop();
@@ -554,7 +626,7 @@ impl Interpreter {
                     };
                     self.stack.push(result);
                 }
-                OpCode::SHR => {
+                opcodes::OpCode::SHR => {
                     const CONST_256: U256 = U256([256, 0, 0, 0]);
                     let shift = self.stack.pop();
                     let value = self.stack.pop();
@@ -565,7 +637,7 @@ impl Interpreter {
                     };
                     self.stack.push(result);
                 }
-                OpCode::SAR => {
+                opcodes::OpCode::SAR => {
                     const CONST_256: U256 = U256([256, 0, 0, 0]);
                     const CONST_HIBIT: U256 = U256([0, 0, 0, 0x8000_0000_0000_0000]);
                     let shift = self.stack.pop();
@@ -587,7 +659,7 @@ impl Interpreter {
                     };
                     self.stack.push(result);
                 }
-                OpCode::SHA3 => {
+                opcodes::OpCode::SHA3 => {
                     let mem_offset = self.stack.pop();
                     let mem_len = self.stack.pop();
                     let k = self
@@ -595,24 +667,32 @@ impl Interpreter {
                         .sha3(self.mem.get(mem_offset.low_u64() as usize, mem_len.low_u64() as usize));
                     self.stack.push(U256::from(k));
                 }
-                OpCode::ADDRESS => {
+                opcodes::OpCode::ADDRESS => {
                     self.stack.push(common::address_to_u256(self.params.address));
                 }
-                OpCode::BALANCE => {
+                opcodes::OpCode::BALANCE => {
                     let address = common::u256_to_address(&self.stack.pop());
                     let balance = self.data_provider.get_balance(&address);
                     self.stack.push(balance);
                 }
-                OpCode::ORIGIN => {
+                opcodes::OpCode::SELFBALANCE => {
+                    let balance = self.data_provider.get_balance(&self.params.receiver);
+                    self.stack.push(balance);
+                }
+                opcodes::OpCode::CHAINID => {
+                    // Tmp set 0,no need for consortium blockchain
+                    self.stack.push(1.into());
+                }
+                opcodes::OpCode::ORIGIN => {
                     self.stack.push(common::address_to_u256(self.params.origin));
                 }
-                OpCode::CALLER => {
+                opcodes::OpCode::CALLER => {
                     self.stack.push(common::address_to_u256(self.params.sender));
                 }
-                OpCode::CALLVALUE => {
+                opcodes::OpCode::CALLVALUE => {
                     self.stack.push(self.params.value);
                 }
-                OpCode::CALLDATALOAD => {
+                opcodes::OpCode::CALLDATALOAD => {
                     let big_id = self.stack.pop();
                     let id = big_id.low_u64() as usize;
                     let max = id.wrapping_add(32);
@@ -629,10 +709,10 @@ impl Interpreter {
                         self.stack.push(U256::zero())
                     }
                 }
-                OpCode::CALLDATASIZE => {
+                opcodes::OpCode::CALLDATASIZE => {
                     self.stack.push(U256::from(self.params.input.len()));
                 }
-                OpCode::CALLDATACOPY => {
+                opcodes::OpCode::CALLDATACOPY => {
                     let mem_offset = self.stack.pop();
                     let raw_offset = self.stack.pop();
                     let size = self.stack.pop();
@@ -640,25 +720,25 @@ impl Interpreter {
                     let data = common::copy_data(self.params.input.as_slice(), raw_offset, size);
                     self.mem.set(mem_offset.as_usize(), data.as_slice());
                 }
-                OpCode::CODESIZE => {
+                opcodes::OpCode::CODESIZE => {
                     self.stack.push(U256::from(self.params.contract.code_data.len()));
                 }
-                OpCode::CODECOPY => {
+                opcodes::OpCode::CODECOPY => {
                     let mem_offset = self.stack.pop();
                     let raw_offset = self.stack.pop();
                     let size = self.stack.pop();
                     let data = common::copy_data(self.params.contract.code_data.as_slice(), raw_offset, size);
                     self.mem.set(mem_offset.as_usize(), data.as_slice());
                 }
-                OpCode::GASPRICE => {
+                opcodes::OpCode::GASPRICE => {
                     self.stack.push(self.params.gas_price);
                 }
-                OpCode::EXTCODESIZE => {
+                opcodes::OpCode::EXTCODESIZE => {
                     let address = common::u256_to_address(&self.stack.pop());
                     let len = self.data_provider.get_code_size(&address);
                     self.stack.push(U256::from(len));
                 }
-                OpCode::EXTCODECOPY => {
+                opcodes::OpCode::EXTCODECOPY => {
                     let address = common::u256_to_address(&self.stack.pop());
                     let mem_offset = self.stack.pop();
                     let code_offset = self.stack.pop();
@@ -667,80 +747,80 @@ impl Interpreter {
                     let data = common::copy_data(code.as_slice(), code_offset, size);
                     self.mem.set(mem_offset.as_usize(), data.as_slice())
                 }
-                OpCode::RETURNDATASIZE => self.stack.push(U256::from(self.return_data.len())),
-                OpCode::RETURNDATACOPY => {
+                opcodes::OpCode::RETURNDATASIZE => self.stack.push(U256::from(self.return_data.len())),
+                opcodes::OpCode::RETURNDATACOPY => {
                     let mem_offset = self.stack.pop();
                     let raw_offset = self.stack.pop();
                     let size = self.stack.pop();
                     let return_data_len = U256::from(self.return_data.len());
                     if raw_offset.saturating_add(size) > return_data_len {
-                        return Err(Error::OutOfBounds);
+                        return Err(err::Error::OutOfBounds);
                     }
                     let data = common::copy_data(&self.return_data, raw_offset, size);
                     self.mem.set(mem_offset.as_usize(), data.as_slice())
                 }
-                OpCode::EXTCODEHASH => {
+                opcodes::OpCode::EXTCODEHASH => {
                     let address = common::u256_to_address(&self.stack.pop());
                     let hash = self.data_provider.get_code_hash(&address);
                     self.stack.push(U256::from(hash));
                 }
-                OpCode::BLOCKHASH => {
+                opcodes::OpCode::BLOCKHASH => {
                     let block_number = self.stack.pop();
                     let block_hash = self.data_provider.get_block_hash(&block_number);
                     self.stack.push(U256::from(&*block_hash));
                 }
-                OpCode::COINBASE => {
+                opcodes::OpCode::COINBASE => {
                     self.stack.push(common::address_to_u256(self.context.coinbase));
                 }
-                OpCode::TIMESTAMP => {
+                opcodes::OpCode::TIMESTAMP => {
                     self.stack.push(U256::from(self.context.timestamp));
                 }
-                OpCode::NUMBER => {
+                opcodes::OpCode::NUMBER => {
                     self.stack.push(self.context.number);
                 }
-                OpCode::DIFFICULTY => {
+                opcodes::OpCode::DIFFICULTY => {
                     self.stack.push(self.context.difficulty);
                 }
-                OpCode::GASLIMIT => {
+                opcodes::OpCode::GASLIMIT => {
                     // Get the block's gas limit
                     self.stack.push(U256::from(self.context.gas_limit));
                 }
-                OpCode::POP => {
+                opcodes::OpCode::POP => {
                     self.stack.pop();
                 }
-                OpCode::MLOAD => {
+                opcodes::OpCode::MLOAD => {
                     let offset = self.stack.pop().as_u64();
                     let word = self.mem.get(offset as usize, 32);
                     self.stack.push(U256::from(word));
                 }
-                OpCode::MSTORE => {
+                opcodes::OpCode::MSTORE => {
                     let offset = self.stack.pop();
                     let word = self.stack.pop();
                     let word = &<[u8; 32]>::from(word)[..];
                     self.mem.set(offset.low_u64() as usize, word);
                 }
-                OpCode::MSTORE8 => {
+                opcodes::OpCode::MSTORE8 => {
                     let offset = self.stack.pop();
                     let word = self.stack.pop();
                     self.mem.set(offset.low_u64() as usize, &[word.low_u64() as u8]);
                 }
-                OpCode::SLOAD => {
+                opcodes::OpCode::SLOAD => {
                     let key = H256::from(self.stack.pop());
                     let word = U256::from(&*self.data_provider.get_storage(&self.params.address, &key));
                     self.stack.push(word);
                 }
-                OpCode::SSTORE => {
+                opcodes::OpCode::SSTORE => {
                     let address = H256::from(&self.stack.pop());
                     let value = self.stack.pop();
                     self.data_provider
                         .set_storage(&self.params.address, address, H256::from(&value));
                 }
-                OpCode::JUMP => {
+                opcodes::OpCode::JUMP => {
                     let jump = self.stack.pop();
                     self.pre_jump(jump)?;
                     pc = jump.low_u64();
                 }
-                OpCode::JUMPI => {
+                opcodes::OpCode::JUMPI => {
                     let jump = self.stack.pop();
                     let condition = self.stack.pop();
                     if !condition.is_zero() {
@@ -748,95 +828,99 @@ impl Interpreter {
                         pc = jump.low_u64();
                     }
                 }
-                OpCode::PC => {
+                opcodes::OpCode::PC => {
                     self.stack.push(U256::from(pc - 1));
                 }
-                OpCode::MSIZE => {
+                opcodes::OpCode::MSIZE => {
                     self.stack.push(U256::from(self.mem.len()));
                 }
-                OpCode::GAS => {
+                opcodes::OpCode::GAS => {
                     self.stack.push(U256::from(self.gas));
                 }
-                OpCode::JUMPDEST => {}
-                OpCode::PUSH1
-                | OpCode::PUSH2
-                | OpCode::PUSH3
-                | OpCode::PUSH4
-                | OpCode::PUSH5
-                | OpCode::PUSH6
-                | OpCode::PUSH7
-                | OpCode::PUSH8
-                | OpCode::PUSH9
-                | OpCode::PUSH10
-                | OpCode::PUSH11
-                | OpCode::PUSH12
-                | OpCode::PUSH13
-                | OpCode::PUSH14
-                | OpCode::PUSH15
-                | OpCode::PUSH16
-                | OpCode::PUSH17
-                | OpCode::PUSH18
-                | OpCode::PUSH19
-                | OpCode::PUSH20
-                | OpCode::PUSH21
-                | OpCode::PUSH22
-                | OpCode::PUSH23
-                | OpCode::PUSH24
-                | OpCode::PUSH25
-                | OpCode::PUSH26
-                | OpCode::PUSH27
-                | OpCode::PUSH28
-                | OpCode::PUSH29
-                | OpCode::PUSH30
-                | OpCode::PUSH31
-                | OpCode::PUSH32 => {
-                    let n = op as u8 - OpCode::PUSH1 as u8 + 1;
+                opcodes::OpCode::JUMPDEST => {}
+                opcodes::OpCode::PUSH1
+                | opcodes::OpCode::PUSH2
+                | opcodes::OpCode::PUSH3
+                | opcodes::OpCode::PUSH4
+                | opcodes::OpCode::PUSH5
+                | opcodes::OpCode::PUSH6
+                | opcodes::OpCode::PUSH7
+                | opcodes::OpCode::PUSH8
+                | opcodes::OpCode::PUSH9
+                | opcodes::OpCode::PUSH10
+                | opcodes::OpCode::PUSH11
+                | opcodes::OpCode::PUSH12
+                | opcodes::OpCode::PUSH13
+                | opcodes::OpCode::PUSH14
+                | opcodes::OpCode::PUSH15
+                | opcodes::OpCode::PUSH16
+                | opcodes::OpCode::PUSH17
+                | opcodes::OpCode::PUSH18
+                | opcodes::OpCode::PUSH19
+                | opcodes::OpCode::PUSH20
+                | opcodes::OpCode::PUSH21
+                | opcodes::OpCode::PUSH22
+                | opcodes::OpCode::PUSH23
+                | opcodes::OpCode::PUSH24
+                | opcodes::OpCode::PUSH25
+                | opcodes::OpCode::PUSH26
+                | opcodes::OpCode::PUSH27
+                | opcodes::OpCode::PUSH28
+                | opcodes::OpCode::PUSH29
+                | opcodes::OpCode::PUSH30
+                | opcodes::OpCode::PUSH31
+                | opcodes::OpCode::PUSH32 => {
+                    let n = op as u8 - opcodes::OpCode::PUSH1 as u8 + 1;
                     let e = pc + u64::from(n);
                     let e = cmp::min(e, self.params.contract.code_data.len() as u64);
                     let r = U256::from(&self.params.contract.code_data[pc as usize..e as usize]);
                     pc = e;
                     self.stack.push(r);
                 }
-                OpCode::DUP1
-                | OpCode::DUP2
-                | OpCode::DUP3
-                | OpCode::DUP4
-                | OpCode::DUP5
-                | OpCode::DUP6
-                | OpCode::DUP7
-                | OpCode::DUP8
-                | OpCode::DUP9
-                | OpCode::DUP10
-                | OpCode::DUP11
-                | OpCode::DUP12
-                | OpCode::DUP13
-                | OpCode::DUP14
-                | OpCode::DUP15
-                | OpCode::DUP16 => {
-                    let p = op as u8 - OpCode::DUP1 as u8;
+                opcodes::OpCode::DUP1
+                | opcodes::OpCode::DUP2
+                | opcodes::OpCode::DUP3
+                | opcodes::OpCode::DUP4
+                | opcodes::OpCode::DUP5
+                | opcodes::OpCode::DUP6
+                | opcodes::OpCode::DUP7
+                | opcodes::OpCode::DUP8
+                | opcodes::OpCode::DUP9
+                | opcodes::OpCode::DUP10
+                | opcodes::OpCode::DUP11
+                | opcodes::OpCode::DUP12
+                | opcodes::OpCode::DUP13
+                | opcodes::OpCode::DUP14
+                | opcodes::OpCode::DUP15
+                | opcodes::OpCode::DUP16 => {
+                    let p = op as u8 - opcodes::OpCode::DUP1 as u8;
                     self.stack.dup(p as usize);
                 }
-                OpCode::SWAP1
-                | OpCode::SWAP2
-                | OpCode::SWAP3
-                | OpCode::SWAP4
-                | OpCode::SWAP5
-                | OpCode::SWAP6
-                | OpCode::SWAP7
-                | OpCode::SWAP8
-                | OpCode::SWAP9
-                | OpCode::SWAP10
-                | OpCode::SWAP11
-                | OpCode::SWAP12
-                | OpCode::SWAP13
-                | OpCode::SWAP14
-                | OpCode::SWAP15
-                | OpCode::SWAP16 => {
-                    let p = op as u8 - OpCode::SWAP1 as u8 + 1;
+                opcodes::OpCode::SWAP1
+                | opcodes::OpCode::SWAP2
+                | opcodes::OpCode::SWAP3
+                | opcodes::OpCode::SWAP4
+                | opcodes::OpCode::SWAP5
+                | opcodes::OpCode::SWAP6
+                | opcodes::OpCode::SWAP7
+                | opcodes::OpCode::SWAP8
+                | opcodes::OpCode::SWAP9
+                | opcodes::OpCode::SWAP10
+                | opcodes::OpCode::SWAP11
+                | opcodes::OpCode::SWAP12
+                | opcodes::OpCode::SWAP13
+                | opcodes::OpCode::SWAP14
+                | opcodes::OpCode::SWAP15
+                | opcodes::OpCode::SWAP16 => {
+                    let p = op as u8 - opcodes::OpCode::SWAP1 as u8 + 1;
                     self.stack.swap(p as usize);
                 }
-                OpCode::LOG0 | OpCode::LOG1 | OpCode::LOG2 | OpCode::LOG3 | OpCode::LOG4 => {
-                    let n = op as u8 - OpCode::LOG0 as u8;
+                opcodes::OpCode::LOG0
+                | opcodes::OpCode::LOG1
+                | opcodes::OpCode::LOG2
+                | opcodes::OpCode::LOG3
+                | opcodes::OpCode::LOG4 => {
+                    let n = op as u8 - opcodes::OpCode::LOG0 as u8;
                     let mem_offset = self.stack.pop();
                     let mem_len = self.stack.pop();
                     let mut topics: Vec<H256> = Vec::new();
@@ -847,7 +931,7 @@ impl Interpreter {
                     let data = self.mem.get(mem_offset.low_u64() as usize, mem_len.low_u64() as usize);
                     self.logs.push(Log(self.params.address, topics, Vec::from(data)));
                 }
-                OpCode::CREATE | OpCode::CREATE2 => {
+                opcodes::OpCode::CREATE | opcodes::OpCode::CREATE2 => {
                     // Clear return data buffer before creating new call frame.
                     self.return_data = vec![];
 
@@ -856,8 +940,8 @@ impl Interpreter {
                     let mem_len = self.stack.pop();
                     let salt = H256::from({
                         match op {
-                            OpCode::CREATE => U256::zero(),
-                            OpCode::CREATE2 => self.stack.pop(),
+                            opcodes::OpCode::CREATE => U256::zero(),
+                            opcodes::OpCode::CREATE2 => self.stack.pop(),
                             _ => panic!("instruction can only be CREATE/CREATE2 checked above"),
                         }
                     });
@@ -903,11 +987,14 @@ impl Interpreter {
                         }
                     }
                 }
-                OpCode::CALL | OpCode::CALLCODE | OpCode::DELEGATECALL | OpCode::STATICCALL => {
+                opcodes::OpCode::CALL
+                | opcodes::OpCode::CALLCODE
+                | opcodes::OpCode::DELEGATECALL
+                | opcodes::OpCode::STATICCALL => {
                     let _ = self.stack.pop();
                     let address = common::u256_to_address(&self.stack.pop());
                     let value = {
-                        if op == OpCode::CALL || op == OpCode::CALLCODE {
+                        if op == opcodes::OpCode::CALL || op == opcodes::OpCode::CALLCODE {
                             self.stack.pop()
                         } else {
                             U256::zero()
@@ -918,8 +1005,8 @@ impl Interpreter {
                     let out_offset = self.stack.pop();
                     let out_len = self.stack.pop();
 
-                    if op == OpCode::CALL && self.params.read_only && !value.is_zero() {
-                        return Err(Error::MutableCallInStaticContext);
+                    if op == opcodes::OpCode::CALL && self.params.read_only && !value.is_zero() {
+                        return Err(err::Error::MutableCallInStaticContext);
                     }
 
                     // Clear return data buffer before creating new call frame.
@@ -962,19 +1049,19 @@ impl Interpreter {
                     params.read_only = self.params.read_only;
 
                     match op {
-                        OpCode::CALL => {
+                        opcodes::OpCode::CALL => {
                             params.sender = self.params.address;
                             params.receiver = address;
                             params.address = address;
                             params.value = value;
                         }
-                        OpCode::CALLCODE => {
+                        opcodes::OpCode::CALLCODE => {
                             params.sender = self.params.address;
                             params.receiver = self.params.address;
                             params.address = self.params.address;
                             params.value = value;
                         }
-                        OpCode::DELEGATECALL => {
+                        opcodes::OpCode::DELEGATECALL => {
                             params.sender = self.params.sender;
                             params.receiver = self.params.address;
                             params.address = self.params.address;
@@ -990,7 +1077,7 @@ impl Interpreter {
                             params.value = self.params.value;
                             params.disable_transfer_value = true;
                         }
-                        OpCode::STATICCALL => {
+                        opcodes::OpCode::STATICCALL => {
                             params.sender = self.params.address;
                             params.receiver = address;
                             params.address = address;
@@ -1027,25 +1114,21 @@ impl Interpreter {
                         }
                     }
                 }
-                OpCode::RETURN => {
+                opcodes::OpCode::RETURN => {
                     let mem_offset = self.stack.pop();
                     let mem_len = self.stack.pop();
                     let r = self.mem.get(mem_offset.low_u64() as usize, mem_len.low_u64() as usize);
                     let return_data = Vec::from(r);
-                    return Ok(InterpreterResult::Normal(
-                        return_data.clone(),
-                        self.gas,
-                        self.logs.clone(),
-                    ));
+                    return Ok(InterpreterResult::Normal(return_data, self.gas, self.logs.clone()));
                 }
-                OpCode::REVERT => {
+                opcodes::OpCode::REVERT => {
                     let mem_offset = self.stack.pop();
                     let mem_len = self.stack.pop();
                     let r = self.mem.get(mem_offset.low_u64() as usize, mem_len.low_u64() as usize);
                     let return_data = Vec::from(r);
-                    return Ok(InterpreterResult::Revert(return_data.clone(), self.gas));
+                    return Ok(InterpreterResult::Revert(return_data, self.gas));
                 }
-                OpCode::SELFDESTRUCT => {
+                opcodes::OpCode::SELFDESTRUCT => {
                     let address = self.stack.pop();
                     let b = self
                         .data_provider
@@ -1063,15 +1146,15 @@ impl Interpreter {
                     break;
                 }
             }
-            log::debug!("");
+            debug!("");
         }
         Ok(InterpreterResult::Normal(vec![], self.gas, self.logs.clone()))
     }
 
-    fn use_gas(&mut self, gas: u64) -> Result<(), Error> {
-        log::debug!("[Gas] - {}", gas);
+    fn use_gas(&mut self, gas: u64) -> Result<(), err::Error> {
+        debug!("[Gas] - {}", gas);
         if self.gas < gas {
-            return Err(Error::OutOfGas);
+            return Err(err::Error::OutOfGas);
         }
         self.gas -= gas;
         Ok(())
@@ -1088,7 +1171,7 @@ impl Interpreter {
         }
     }
 
-    fn mem_gas_work(&mut self, mem_offset: U256, mem_len: U256) -> Result<(), Error> {
+    fn mem_gas_work(&mut self, mem_offset: U256, mem_len: U256) -> Result<(), err::Error> {
         if mem_len.is_zero() {
             return Ok(());
         }
@@ -1099,12 +1182,11 @@ impl Interpreter {
         //
         // But to keep some imagination, 1G is used as the ceil.
         if b || mem_sum.bits() > 64 || mem_sum.low_u64() > 1024 * 1024 * 1024 {
-            return Err(Error::OutOfGas);
+            return Err(err::Error::OutOfGas);
         }
-        if mem_len != U256::zero() {
-            let gas = self.mem_gas_cost(mem_sum.low_u64());
-            self.use_gas(gas)?;
-        }
+
+        let gas = self.mem_gas_cost(mem_sum.low_u64());
+        self.use_gas(gas)?;
         self.mem.expand(mem_sum.low_u64() as usize);
         Ok(())
     }
@@ -1116,35 +1198,35 @@ impl Interpreter {
         None
     }
 
-    fn get_op(&self, n: u64) -> Result<Option<OpCode>, Error> {
+    fn get_op(&self, n: u64) -> Result<Option<opcodes::OpCode>, err::Error> {
         match self.get_byte(n) {
-            Some(a) => match OpCode::from_u8(a) {
+            Some(a) => match opcodes::OpCode::from_u8(a) {
                 Some(b) => Ok(Some(b)),
-                None => Err(Error::InvalidOpcode),
+                None => Err(err::Error::InvalidOpcode),
             },
             None => Ok(None),
         }
     }
 
-    fn pre_jump(&self, n: U256) -> Result<(), Error> {
+    fn pre_jump(&self, n: U256) -> Result<(), err::Error> {
         if n.bits() > 63 {
-            return Err(Error::InvalidJumpDestination);
+            return Err(err::Error::InvalidJumpDestination);
         }
         let n = n.low_u64() as usize;
         if n >= self.params.contract.code_data.len() {
-            return Err(Error::InvalidJumpDestination);
+            return Err(err::Error::InvalidJumpDestination);
         }
         // Only JUMPDESTs allowed for destinations
-        if self.params.contract.code_data[n] != OpCode::JUMPDEST as u8 {
-            return Err(Error::InvalidJumpDestination);
+        if self.params.contract.code_data[n] != opcodes::OpCode::JUMPDEST as u8 {
+            return Err(err::Error::InvalidJumpDestination);
         }
         Ok(())
     }
 
     /// Function trace outputs execution informations.
-    fn trace(&self, op: &OpCode, pc: u64) {
-        if *op >= OpCode::PUSH1 && *op <= OpCode::PUSH32 {
-            let n = op.clone() as u8 - OpCode::PUSH1 as u8 + 1;
+    fn trace(&self, op: &opcodes::OpCode, pc: u64) {
+        if *op >= opcodes::OpCode::PUSH1 && *op <= opcodes::OpCode::PUSH32 {
+            let n = op.clone() as u8 - opcodes::OpCode::PUSH1 as u8 + 1;
             let r = {
                 if pc + u64::from(n) > self.params.contract.code_data.len() as u64 {
                     U256::zero()
@@ -1152,24 +1234,22 @@ impl Interpreter {
                     U256::from(&self.params.contract.code_data[pc as usize..(pc + u64::from(n)) as usize])
                 }
             };
-            log::debug!("[OP] {} {:#x} gas={}", op, r, self.gas);
+            debug!("[OP] {} {:#x} gas={}", op, r, self.gas);
         } else {
-            log::debug!("[OP] {} gas={}", op, self.gas);
+            debug!("[OP] {} gas={}", op, self.gas);
         }
-        log::debug!("[STACK]");
+        debug!("[STACK]");
         let l = self.stack.data().len();
         for i in 0..l {
-            log::debug!("[{}] {:#x}", i, self.stack.back(i));
+            debug!("[{}] {:#x}", i, self.stack.back(i));
         }
-        log::debug!("[MEM] len={}", self.mem.len());
+        debug!("[MEM] len={}", self.mem.len());
     }
 }
 
 #[cfg(test)]
 mod tests {
     // The unit tests just carried from go-ethereum.
-    use ethereum_types::Address;
-
     use super::super::extmock;
     use super::*;
 
@@ -1244,7 +1324,7 @@ mod tests {
             let mut it = default_interpreter();
             it.stack
                 .push_n(&[U256::from(val), U256::from(th.parse::<u64>().unwrap())]);
-            it.params.contract.code_data = vec![OpCode::BYTE as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::BYTE as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
@@ -1312,7 +1392,7 @@ mod tests {
         for (x, y, expected) in data {
             let mut it = default_interpreter();
             it.stack.push_n(&[U256::from(x), U256::from(y)]);
-            it.params.contract.code_data = vec![OpCode::SHL as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::SHL as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
@@ -1380,7 +1460,7 @@ mod tests {
         for (x, y, expected) in data {
             let mut it = default_interpreter();
             it.stack.push_n(&[U256::from(x), U256::from(y)]);
-            it.params.contract.code_data = vec![OpCode::SHR as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::SHR as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
@@ -1473,10 +1553,18 @@ mod tests {
         for (x, y, expected) in data {
             let mut it = default_interpreter();
             it.stack.push_n(&[U256::from(x), U256::from(y)]);
-            it.params.contract.code_data = vec![OpCode::SAR as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::SAR as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
+    }
+
+    #[test]
+    fn test_op_chain_id() {
+        let mut it = default_interpreter();
+        it.params.contract.code_data = vec![opcodes::OpCode::CHAINID as u8];
+        it.run().unwrap();
+        assert_eq!(it.stack.pop(), U256::from(1));
     }
 
     #[test]
@@ -1546,7 +1634,7 @@ mod tests {
         for (x, y, expected) in data {
             let mut it = default_interpreter();
             it.stack.push_n(&[U256::from(x), U256::from(y)]);
-            it.params.contract.code_data = vec![OpCode::SGT as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::SGT as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
@@ -1619,7 +1707,7 @@ mod tests {
         for (x, y, expected) in data {
             let mut it = default_interpreter();
             it.stack.push_n(&[U256::from(x), U256::from(y)]);
-            it.params.contract.code_data = vec![OpCode::SLT as u8];
+            it.params.contract.code_data = vec![opcodes::OpCode::SLT as u8];
             it.run().unwrap();
             assert_eq!(it.stack.pop(), U256::from(expected));
         }
@@ -1630,11 +1718,11 @@ mod tests {
         let mut it = default_interpreter();
         let v = "abcdef00000000000000abba000000000deaf000000c0de00100000000133700";
         it.stack.push_n(&[U256::from(v), U256::zero()]);
-        it.params.contract.code_data = vec![OpCode::MSTORE as u8];
+        it.params.contract.code_data = vec![opcodes::OpCode::MSTORE as u8];
         it.run().unwrap();
         assert_eq!(it.mem.get(0, 32), hex::decode(v).unwrap().as_slice());
         it.stack.push_n(&[U256::one(), U256::zero()]);
-        it.params.contract.code_data = vec![OpCode::MSTORE as u8];
+        it.params.contract.code_data = vec![opcodes::OpCode::MSTORE as u8];
         it.run().unwrap();
         assert_eq!(
             it.mem.get(0, 32),
@@ -1687,6 +1775,6 @@ mod tests {
         it.params.contract.code_data = hex::decode("fb").unwrap();
         let r = it.run();
         assert!(r.is_err());
-        assert_eq!(r.err(), Some(Error::InvalidOpcode))
+        assert_eq!(r.err(), Some(err::Error::InvalidOpcode))
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use ethereum_types::Address;
@@ -58,15 +58,15 @@ pub struct Account {
     pub balance: String,
     pub code: String,
     pub nonce: String,
-    pub storage: HashMap<String, String>,
+    pub storage: BTreeMap<String, String>,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Clone)]
-pub struct State(pub HashMap<Address, Account>);
+pub struct State(pub BTreeMap<Address, Account>);
 
 impl IntoIterator for State {
-    type Item = <HashMap<Address, Account> as IntoIterator>::Item;
-    type IntoIter = <HashMap<Address, Account> as IntoIterator>::IntoIter;
+    type Item = <BTreeMap<Address, Account> as IntoIterator>::Item;
+    type IntoIter = <BTreeMap<Address, Account> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -101,11 +101,11 @@ pub struct Vm {
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
-pub struct Test(HashMap<String, Vm>);
+pub struct Test(BTreeMap<String, Vm>);
 
 impl IntoIterator for Test {
-    type Item = <HashMap<String, Vm> as IntoIterator>::Item;
-    type IntoIter = <HashMap<String, Vm> as IntoIterator>::IntoIter;
+    type Item = <BTreeMap<String, Vm> as IntoIterator>::Item;
+    type IntoIter = <BTreeMap<String, Vm> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn test_json_tests_parse() {
-        let f = fs::File::open("/tmp/jsondata/VMTests/vmArithmeticTest/add0.json").unwrap();
+        let f = fs::File::open("../jsondata/VMTests/vmArithmeticTest/add0.json").unwrap();
+        //let f = fs::File::open("/tmp/jsondata/VMTests/vmArithmeticTest/add0.json").unwrap();
         let t = Test::load(f).unwrap();
         assert!(t.0.contains_key("add0"));
         let v = &t.0["add0"];

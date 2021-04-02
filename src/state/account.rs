@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cita_trie::{PatriciaTrie, Trie, DB};
@@ -17,16 +18,18 @@ pub struct Account {
     pub nonce: U256,
     pub storage_root: H256,
     pub code_hash: H256,
+    pub abi_hash: H256,
 }
 
 /// Free to use rlp::encode().
 impl rlp::Encodable for Account {
     fn rlp_append(&self, s: &mut rlp::RlpStream) {
-        s.begin_list(4)
+        s.begin_list(5)
             .append(&self.nonce)
             .append(&self.balance)
             .append(&self.storage_root)
-            .append(&self.code_hash);
+            .append(&self.code_hash)
+            .append(&self.abi_hash);
     }
 }
 
@@ -38,6 +41,7 @@ impl rlp::Decodable for Account {
             balance: data.val_at(1)?,
             storage_root: data.val_at(2)?,
             code_hash: data.val_at(3)?,
+            abi_hash: data.val_at(4)?,
         })
     }
 }
@@ -57,6 +61,10 @@ pub struct StateObject {
     pub code: Vec<u8>,
     pub code_size: usize,
     pub code_state: CodeState,
+    pub abi_hash: H256,
+    pub abi: Vec<u8>,
+    pub abi_size: usize,
+    pub abi_state: CodeState,
     pub storage_changes: HashMap<H256, H256>,
 }
 
@@ -70,12 +78,17 @@ impl From<Account> for StateObject {
             code: vec![],
             code_size: 0,
             code_state: CodeState::Clean,
+            abi_hash: account.abi_hash,
+            abi: vec![],
+            abi_size: 0,
+            abi_state: CodeState::Clean,
             storage_changes: HashMap::new(),
         }
     }
 }
 
-const CODE_PREFIX: &str = "C:";
+//const CODE_PREFIX: &str = "C:";
+//const ABI_PREFIX: &str = "ABI:";
 
 impl StateObject {
     /// Create a new account.
@@ -90,6 +103,10 @@ impl StateObject {
             code: vec![],
             code_size: 0,
             code_state: CodeState::Clean,
+            abi_hash: common::hash::NIL_DATA,
+            abi: vec![],
+            abi_size: 0,
+            abi_state: CodeState::Clean,
             storage_changes: HashMap::new(),
         }
     }
@@ -108,6 +125,7 @@ impl StateObject {
             nonce: self.nonce,
             storage_root: self.storage_root,
             code_hash: self.code_hash,
+            abi_hash: self.abi_hash,
         }
     }
 
@@ -119,15 +137,38 @@ impl StateObject {
     /// Function is_empty returns whether the given account is empty. Empty
     /// is defined according to EIP161 (balance = nonce = code = 0).
     pub fn is_empty(&self) -> bool {
-        self.balance.is_zero() && self.nonce.is_zero() && self.code_hash == common::hash::NIL_DATA
+        self.balance.is_zero()
+            && self.nonce.is_zero()
+            && self.code_hash == common::hash::NIL_DATA
+            && self.storage_root == common::hash::RLP_NULL
     }
 
     /// Init the code by given data.
     pub fn init_code(&mut self, code: Vec<u8>) {
         self.code = code;
-        self.code_hash = From::from(&common::hash::summary(&self.code)[..]);
         self.code_size = self.code.len();
+        self.code_hash = {
+            if self.code_size > 0 {
+                From::from(&common::hash::summary(&self.code)[..])
+            } else {
+                common::hash::NIL_DATA
+            }
+        };
         self.code_state = CodeState::Dirty;
+    }
+
+    /// Init the abi by given data.
+    pub fn init_abi(&mut self, abi: Vec<u8>) {
+        self.abi = abi;
+        self.abi_size = self.abi.len();
+        self.abi_hash = {
+            if self.abi_size > 0 {
+                From::from(&common::hash::summary(&self.abi)[..])
+            } else {
+                common::hash::NIL_DATA
+            }
+        };
+        self.abi_state = CodeState::Dirty;
     }
 
     /// Read the code from database by it's codehash.
@@ -135,15 +176,28 @@ impl StateObject {
         if self.code_hash == common::hash::NIL_DATA {
             return Ok(());
         }
-        let mut k = CODE_PREFIX.as_bytes().to_vec();
-        k.extend(self.code_hash.to_vec());
         let c = db
-            .get(&k)
+            .get(&self.code_hash.to_vec())
             .or_else(|e| Err(Error::DB(format!("{}", e))))?
             .unwrap_or_else(|| vec![]);
         self.code = c;
         self.code_size = self.code.len();
         self.code_state = CodeState::Clean;
+        Ok(())
+    }
+
+    /// Read the abi from database by it's abihash.
+    pub fn read_abi<B: DB>(&mut self, db: Arc<B>) -> Result<(), Error> {
+        if self.abi_hash == common::hash::NIL_DATA {
+            return Ok(());
+        }
+        let c = db
+            .get(&self.abi_hash.to_vec())
+            .or_else(|e| Err(Error::DB(format!("{}", e))))?
+            .unwrap_or_else(|| vec![]);
+        self.abi = c;
+        self.abi_size = self.abi.len();
+        self.abi_state = CodeState::Clean;
         Ok(())
     }
 
@@ -164,9 +218,7 @@ impl StateObject {
     /// Sub balance.
     /// Note: overflowing is not allowed.
     pub fn sub_balance(&mut self, x: U256) {
-        let (a, b) = self.balance.overflowing_sub(x);
-        assert_eq!(b, false);
-        self.balance = a;
+        self.balance = self.balance.saturating_sub(x);
     }
 
     /// Set (key, value) in storage cache.
@@ -180,7 +232,7 @@ impl StateObject {
             return Ok(None);
         }
         let trie = PatriciaTrie::from(db, Arc::new(hash::get_hasher()), &self.storage_root.0)?;
-        if let Some(b) = trie.get(&common::hash::summary(key))? {
+        if let Some(b) = trie.get(key)? {
             let u256_k: U256 = rlp::decode(&b)?;
             let h256_k: H256 = u256_k.into();
             return Ok(Some(h256_k));
@@ -190,7 +242,18 @@ impl StateObject {
 
     /// Get value by key from storage cache.
     pub fn get_storage_at_changes(&self, key: &H256) -> Option<H256> {
-        self.storage_changes.get(key).and_then(|e| Some(*e))
+        self.storage_changes.get(key).copied()
+    }
+
+    /// Get the storage changes
+    pub fn get_storage_changes(&self) -> BTreeMap<String, String> {
+        let mut result = BTreeMap::new();
+        for (k, v) in self.storage_changes.iter() {
+            let key = String::from("0x") + &hex::encode(*k);
+            let value = String::from("0x") + &hex::encode(*v);
+            result.insert(key.clone(), value.clone());
+        }
+        result
     }
 
     /// Get value by key.
@@ -219,13 +282,15 @@ impl StateObject {
         } else {
             PatriciaTrie::from(db, Arc::new(hash::get_hasher()), &self.storage_root.0)?
         };
+
         for (k, v) in self.storage_changes.drain() {
             if v.is_zero() {
-                trie.remove(&common::hash::summary(&k))?;
+                trie.remove(&k)?;
             } else {
-                trie.insert(common::hash::summary(&k), rlp::encode(&U256::from(v)))?;
+                trie.insert(k.to_vec(), rlp::encode(&U256::from(v)))?;
             }
         }
+
         self.storage_root = H256::from(&(trie.root()?)[..]);
         Ok(())
     }
@@ -238,12 +303,28 @@ impl StateObject {
                 self.code_state = CodeState::Clean;
             }
             (true, false) => {
-                let mut k = CODE_PREFIX.as_bytes().to_vec();
-                k.extend(self.code_hash.to_vec());
-                db.insert(k, self.code.clone())
+                db.insert(self.code_hash.to_vec(), self.code.clone())
                     .or_else(|e| Err(Error::DB(format!("{}", e))))?;
                 self.code_size = self.code.len();
                 self.code_state = CodeState::Clean;
+            }
+            (false, _) => {}
+        }
+        Ok(())
+    }
+
+    /// Flush abi to database if necessary.
+    pub fn commit_abi<B: DB>(&mut self, db: Arc<B>) -> Result<(), Error> {
+        match (self.abi_state == CodeState::Dirty, self.abi.is_empty()) {
+            (true, true) => {
+                self.abi_size = 0;
+                self.abi_state = CodeState::Clean;
+            }
+            (true, false) => {
+                db.insert(self.abi_hash.to_vec(), self.abi.clone())
+                    .or_else(|e| Err(Error::DB(format!("{}", e))))?;
+                self.abi_size = self.abi.len();
+                self.abi_state = CodeState::Clean;
             }
             (false, _) => {}
         }
@@ -260,6 +341,10 @@ impl StateObject {
             code_hash: self.code_hash,
             code_size: self.code_size,
             code_state: self.code_state,
+            abi: self.abi.clone(),
+            abi_hash: self.abi_hash,
+            abi_size: self.abi_size,
+            abi_state: self.abi_state,
             storage_changes: HashMap::new(),
         }
     }
@@ -280,6 +365,10 @@ impl StateObject {
         self.code_state = other.code_state;
         self.code = other.code;
         self.code_size = other.code_size;
+        self.abi_hash = other.abi_hash;
+        self.abi_state = other.abi_state;
+        self.abi = other.abi;
+        self.abi_size = other.abi_size;
         self.storage_changes = other.storage_changes;
     }
 }
@@ -294,8 +383,9 @@ mod tests {
         assert_eq!(o.balance, 69u8.into());
         assert_eq!(o.nonce, 0u8.into());
         assert_eq!(o.code_hash, common::hash::NIL_DATA);
+        assert_eq!(o.abi_hash, common::hash::NIL_DATA);
         assert_eq!(o.storage_root, common::hash::RLP_NULL);
-        assert_eq!(hex::encode(rlp::encode(&o.account())), "f8448045a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
+        assert_eq!(hex::encode(rlp::encode(&o.account())), "f8658045a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
     }
 
     #[test]
@@ -322,8 +412,7 @@ mod tests {
             "af231e631776a517ca23125370d542873eca1fb4d613ed9b5d5335a46ae5b7eb".into()
         );
 
-        let mut k = CODE_PREFIX.as_bytes().to_vec();
-        k.extend(a.code_hash.to_vec());
+        let k = a.code_hash.to_vec();
         assert_eq!(db.get(&k).unwrap().unwrap(), vec![0x55, 0x44, 0xffu8]);
         a.init_code(vec![0x55]);
         assert_eq!(a.code_state, CodeState::Dirty);
@@ -334,8 +423,7 @@ mod tests {
             "37bf2238b11b68cdc8382cece82651b59d3c3988873b6e0f33d79694aa45f1be".into()
         );
 
-        let mut k = CODE_PREFIX.as_bytes().to_vec();
-        k.extend(a.code_hash.to_vec());
+        let k = a.code_hash.to_vec();
         assert_eq!(db.get(&k).unwrap().unwrap(), vec![0x55]);
     }
 
@@ -347,7 +435,7 @@ mod tests {
         a.commit_storage(Arc::clone(&db)).unwrap();
         assert_eq!(
             a.storage_root,
-            "c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            "71623f5ec821de33ad5aa81f8c82f0916c6f60de0a536f8c466d440c56715bd5".into()
         );
     }
 
@@ -359,19 +447,22 @@ mod tests {
         a.commit_storage(Arc::clone(&db)).unwrap();
         assert_eq!(
             a.storage_root,
-            "c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            //"c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            "71623f5ec821de33ad5aa81f8c82f0916c6f60de0a536f8c466d440c56715bd5".into()
         );
         a.set_storage(1.into(), 0x1234.into());
         a.commit_storage(Arc::clone(&db)).unwrap();
         assert_eq!(
             a.storage_root,
-            "4e49574efd650366d071855e0a3975123ea9d64cc945e8f5de8c8c517e1b4ca5".into()
+            //"4e49574efd650366d071855e0a3975123ea9d64cc945e8f5de8c8c517e1b4ca5".into()
+            "a3db671bd0653a641fb031dccb869982da390eade9e6f993802ed09c4f6b7b2a".into()
         );
         a.set_storage(1.into(), 0.into());
         a.commit_storage(Arc::clone(&db)).unwrap();
         assert_eq!(
             a.storage_root,
-            "c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            //"c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            "71623f5ec821de33ad5aa81f8c82f0916c6f60de0a536f8c466d440c56715bd5".into()
         );
     }
 
@@ -389,7 +480,8 @@ mod tests {
         a = StateObject::from_rlp(&a_rlp[..]).unwrap();
         assert_eq!(
             a.storage_root,
-            "c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            //"c57e1afb758b07f8d2c8f13a3b6e44fa5ff94ab266facc5a4fd3f062426e50b2".into()
+            "71623f5ec821de33ad5aa81f8c82f0916c6f60de0a536f8c466d440c56715bd5".into()
         );
         assert_eq!(
             a.get_storage(Arc::clone(&db), &0x00u64.into()).unwrap().unwrap(),
