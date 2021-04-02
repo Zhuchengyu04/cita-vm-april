@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::sync::Arc;
+
 use std::thread;
 use std::sync::mpsc;
 
@@ -45,16 +46,7 @@ pub struct State<B> {
     pub cache: RefCell<HashMap<Address, StateObjectEntry>>,
     /// Checkpoints are used to revert to history
     pub checkpoints: RefCell<Vec<HashMap<Address, Option<StateObjectEntry>>>>,
-    //add vc
-    // pub vc_commitment: H256,
 }
-// pub fn create_vc_commitment(seed: &String, ciphersuite: u8, slice_num: u32, values: &Vec<String>, com: &mut String) {
-//     let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, ciphersuite, slice_num as usize).unwrap();
-//     let state_commitment = Commitment::new(&prover_params, values).unwrap();
-//     let mut commitment_bytes: Vec<u8> = vec![];
-//     state_commitment.serialize(&mut commitment_bytes, true);
-//     *com = format!("{:?}", String::from_utf8(commitment_bytes));
-// }
 
 impl<B: DB> State<B> {
     /// Creates empty state for test.
@@ -68,8 +60,6 @@ impl<B: DB> State<B> {
             root: From::from(&root[..]),
             cache: RefCell::new(HashMap::new()),
             checkpoints: RefCell::new(Vec::new()),
-            //add vc
-            // vc_commitment: H256::from(0),
         })
     }
 
@@ -88,8 +78,6 @@ impl<B: DB> State<B> {
             root,
             cache: RefCell::new(HashMap::new()),
             checkpoints: RefCell::new(Vec::new()),
-            //add vc
-            // vc_commitment: H256::from(0),
         })
     }
 
@@ -324,10 +312,8 @@ impl<B: DB> State<B> {
     }
 
     /// Flush the data from cache to database.
-    // pub fn commit(&mut self, block_number: u64) -> Result<(), Error> {
-        pub fn commit(&mut self) -> Result<(), Error> {
+    pub fn commit(&mut self) -> Result<(), Error> {
         assert!(self.checkpoints.borrow().is_empty());
-
         // Firstly, update account storage tree
         let db = Arc::clone(&self.db);
         self.cache
@@ -339,9 +325,11 @@ impl<B: DB> State<B> {
                 }
 
                 if let Some(ref mut state_object) = entry.state_object {
+                    // When operate on account element, AccountDB should be used
                     let accdb = Arc::new(AccountDB::new(*address, Arc::clone(&db)));
                     state_object.commit_storage(Arc::clone(&accdb))?;
-                    state_object.commit_code(Arc::clone(&db))?;
+                    state_object.commit_code(Arc::clone(&accdb))?;
+                    state_object.commit_abi(Arc::clone(&accdb))?;
                 }
                 Ok(())
             })
@@ -349,6 +337,7 @@ impl<B: DB> State<B> {
 
         // Secondly, update the world state tree
         let mut trie = PatriciaTrie::from(Arc::clone(&self.db), Arc::new(hash::get_hasher()), &self.root.0)?;
+
         let key_values = self
             .cache
             .borrow_mut()
@@ -356,100 +345,98 @@ impl<B: DB> State<B> {
             .filter(|&(_, ref a)| a.is_dirty())
             .map(|(address, entry)| {
                 entry.status = ObjectStatus::Committed;
-
                 match entry.state_object {
-                    Some(ref mut state_object) => (
-                        common::hash::summary(&address[..]),
-                        rlp::encode(&state_object.account()),
-                    ),
-                    None => (common::hash::summary(&address[..]), vec![]),
+                    Some(ref mut state_object) => (address.to_vec(), rlp::encode(&state_object.account())),
+                    None => (address.to_vec(), vec![]),
                 }
             })
             .collect::<Vec<(Vec<u8>, Vec<u8>)>>();
 
-        //add vc
-        let kv_size = key_values.len();
+         //add vc
+         let kv_size = key_values.len();
 
-        let per_pos_size = 2;
-        // let l = block_number;
+         let per_pos_size = 2;
+        //  let l = block_number;
         let l = 1;
-        let n = kv_size;
-        const slices_num: i32 = 4;
-        // let mut rng = ChaChaRng::from_seed(l);
-        let mut values: Vec<String> = Vec::with_capacity(n);
-        // let mut slice_values:Vec<Vec<String>> = vec![vec![String::new()]];
-        let mut slice_value_0: Vec<String> = vec![String::from("0")];
-        let mut slice_value_1: Vec<String> = vec![String::from("0")];
-        let mut slice_value_2: Vec<String> = vec![String::from("0")];
-        let mut slice_value_3: Vec<String> = vec![String::from("0")];
-
-        let mut slice_map = HashMap::new();
-
-        slice_map.insert(0, slice_value_0.clone());
-        slice_map.insert(1, slice_value_1.clone());
-        slice_map.insert(2, slice_value_2.clone());
-        slice_map.insert(3, slice_value_3.clone());
-
-        for (key, value) in key_values.into_iter() {
-            let mut k = *(key.get(key.len() - 1).unwrap());
-            k &= 0b0000_0011;
-
-            let remains = k as usize;
-            let strs = format!("{}{}", String::from_utf8_lossy(&key), String::from_utf8_lossy(&value));
-            trie.insert(key.clone(), value.clone())?;
-            // values.push(strs);
-            slice_map.get_mut(&remains).unwrap().push(strs.clone());
-        }
-        let mut sub_commitments:Vec<String> = Vec::with_capacity(4);
-        let (tx, rx) = mpsc::channel();
-
-        let mut threads = vec![];
-
-        for i in 0..(3) {
-            // let maps = slice_map.clone();
-            let sizes = (slice_map.get(&i).unwrap().len() as u32);
-            let sub_value = slice_map.get(&i).unwrap().clone();
-            let sends = mpsc::Sender::clone(&tx);
-            let t = thread::spawn(move || {
-                // create_vc_commitment(
-                //     &format!("123456789012345678901234567890{}-{}", l.to_string(), i.to_string()),
-                //     0,
-                //     sizes,
-                //     &slice_map.clone().get(&i).unwrap(),
-                //     &mut sub_commitments[i.clone() as usize],
-                // )
-                let seed = format!("1234567890123456789012345678901{}-{}", l.to_string(), i.to_string());
-                let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, 0, sizes as usize).unwrap();
-                let state_commitment = Commitment::new(&prover_params, &sub_value).unwrap();
-                let mut commitment_bytes: Vec<u8> = vec![];
-                state_commitment.serialize(&mut commitment_bytes, true);
-                sends.send((i,format!("{:?}", String::from_utf8(commitment_bytes)))).unwrap();
-                
-            });
-            threads.push(t);
-        }
-        let (mut all_prover_params, all_verifier_params) =
-            paramgen_from_seed(format!("1234567890123456789012345678901{}", l.to_string()), 0, 4).unwrap();
-        all_prover_params.precomp_256();
-        for t in threads {
-            t.join().unwrap();
-        }
-
-        let mut all_sub_commitment:Vec<String> = vec!["0".to_string();4];
-        for received in rx {
-            // println!("Got: {}", received);
-            all_sub_commitment[received.0] = received.1;
-            println!("{}",&all_sub_commitment[received.0]);
-        }
-
-        // format!("{}{}{}{}", sub_commitments_0,sub_commitments_1,sub_commitments_2,sub_commitments_3);
-        let  state_commitment = Commitment::new(&all_prover_params, &all_sub_commitment).unwrap();
-        let mut commitment_bytes: Vec<u8> = vec![];
-        assert!(state_commitment.serialize(&mut commitment_bytes, true).is_ok());
-        let res = &commitment_bytes;
-        println!("all:{:?}",String::from_utf8(res.to_vec()));
-        self.root = From::from(&trie.root()?[..]);
-        self.db.flush().or_else(|e| Err(Error::DB(format!("{}", e))))
+         let n = kv_size;
+         const slices_num: i32 = 4;
+         // let mut rng = ChaChaRng::from_seed(l);
+         let mut values: Vec<String> = Vec::with_capacity(n);
+         // let mut slice_values:Vec<Vec<String>> = vec![vec![String::new()]];
+         let mut slice_value_0: Vec<String> = vec![String::from("0")];
+         let mut slice_value_1: Vec<String> = vec![String::from("0")];
+         let mut slice_value_2: Vec<String> = vec![String::from("0")];
+         let mut slice_value_3: Vec<String> = vec![String::from("0")];
+ 
+         let mut slice_map = HashMap::new();
+ 
+         slice_map.insert(0, slice_value_0.clone());
+         slice_map.insert(1, slice_value_1.clone());
+         slice_map.insert(2, slice_value_2.clone());
+         slice_map.insert(3, slice_value_3.clone());
+ 
+         for (key, value) in key_values.into_iter() {
+             let mut k = *(key.get(key.len() - 1).unwrap());
+             k &= 0b0000_0011;
+ 
+             let remains = k as usize;
+             let strs = format!("{}{}", String::from_utf8_lossy(&key), String::from_utf8_lossy(&value));
+             trie.insert(key.clone(), value.clone())?;
+             // values.push(strs);
+             slice_map.get_mut(&remains).unwrap().push(strs.clone());
+         }
+         let mut sub_commitments:Vec<String> = Vec::with_capacity(4);
+         let (tx, rx) = mpsc::channel();
+ 
+         let mut threads = vec![];
+ 
+         for i in 0..(3) {
+             // let maps = slice_map.clone();
+             let sizes = (slice_map.get(&i).unwrap().len() as u32);
+             let sub_value = slice_map.get(&i).unwrap().clone();
+             let sends = mpsc::Sender::clone(&tx);
+             let t = thread::spawn(move || {
+                 // create_vc_commitment(
+                 //     &format!("123456789012345678901234567890{}-{}", l.to_string(), i.to_string()),
+                 //     0,
+                 //     sizes,
+                 //     &slice_map.clone().get(&i).unwrap(),
+                 //     &mut sub_commitments[i.clone() as usize],
+                 // )
+                 let seed = format!("1234567890123456789012345678901{}-{}", l.to_string(), i.to_string());
+                 let (mut prover_params, verifier_params) = paramgen_from_seed(&seed, 0, sizes as usize).unwrap();
+                 let state_commitment = Commitment::new(&prover_params, &sub_value).unwrap();
+                 let mut commitment_bytes: Vec<u8> = vec![];
+                 state_commitment.serialize(&mut commitment_bytes, true);
+                 sends.send((i,format!("{:?}", String::from_utf8(commitment_bytes)))).unwrap();
+                 
+             });
+             threads.push(t);
+         }
+         let (mut all_prover_params, all_verifier_params) =
+             paramgen_from_seed(format!("1234567890123456789012345678901{}", l.to_string()), 0, 4).unwrap();
+         all_prover_params.precomp_256();
+         for t in threads {
+             t.join().unwrap();
+         }
+ 
+         let mut all_sub_commitment:Vec<String> = vec!["0".to_string();4];
+         for received in rx {
+             // println!("Got: {}", received);
+             all_sub_commitment[received.0] = received.1;
+             println!("{}",&all_sub_commitment[received.0]);
+         }
+ 
+         // format!("{}{}{}{}", sub_commitments_0,sub_commitments_1,sub_commitments_2,sub_commitments_3);
+         let  state_commitment = Commitment::new(&all_prover_params, &all_sub_commitment).unwrap();
+ 
+         self.root = From::from(&trie.root()?[..]);
+         let mut commitment_bytes: Vec<u8> = vec![];
+         assert!(state_commitment.serialize(&mut commitment_bytes, true).is_ok());
+         let res = &commitment_bytes;
+         println!("all:{:?}",String::from_utf8(res.to_vec()));
+        //  self.vc_commitment = ser::from_str(&format!("{:?}", String::from_utf8(commitment_bytes))).unwrap();
+         self.db.flush().or_else(|e| Err(Error::DB(format!("{}", e))))
     }
 
     /// Create a recoverable checkpoint of this state. Return the checkpoint index.
@@ -1020,31 +1007,4 @@ mod tests {
 
         assert_eq!(state.root, expected.into());
     }
-
-    // #[test]
-    // fn generate_vc() {
-    //     let lambda = 128;
-    //     let n = 1024;
-    //     let mut rng = ChaChaRng::from_seed([0u8; 32]);
-
-    //     let ph = Rc::new(PrimeHash::init(64));
-
-    //     let config = Config { lambda, n, ph };
-    //     let mut vc = BinaryVectorCommitment::<Accumulator>::setup::<RSAGroup, _>(&mut rng, &config);
-
-    //     let mut val: Vec<bool> = (0..64).map(|_| rng.gen()).collect();
-    //     // set two bits manually, to make checks easier
-    //     val[2] = true;
-    //     val[3] = false;
-
-    //     vc.commit(&val);
-
-    //     // open a set bit
-    //     let comm = vc.open(&true, 2);
-    //     assert!(vc.verify(&true, 2, &comm), "invalid commitment (bit set)");
-
-    //     // open a set bit
-    //     let comm = vc.open(&false, 3);
-    //     assert!(vc.verify(&false, 3, &comm), "invalid commitment (bit not set)");
-    // }
 }
