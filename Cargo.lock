@@ -203,7 +203,6 @@ dependencies = [
  "byteorder",
  "bytes 0.4.12",
  "cita_trie",
- "ckb-vm",
  "env_logger",
  "ethereum-types",
  "hashbrown",
