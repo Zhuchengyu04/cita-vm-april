@@ -241,30 +241,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ckb-vm"
-version = "0.19.1"
-source = "git+https://github.com/nervosnetwork/ckb-vm#189d0971708e0c3c0f17d05410b02f834a603424"
-dependencies = [
- "byteorder",
- "bytes 0.5.6",
- "cc",
- "ckb-vm-definitions",
- "derive_more",
- "goblin 0.2.3",
- "goblin 0.3.4",
- "libc",
- "mapr",
- "rand 0.7.3",
- "scroll",
- "serde",
-]
-
-[[package]]
-name = "ckb-vm-definitions"
-version = "0.19.1"
-source = "git+https://github.com/nervosnetwork/ckb-vm#189d0971708e0c3c0f17d05410b02f834a603424"
-
-[[package]]
 name = "clap"
 version = "2.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,7 +853,19 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2839e79665f131bdb5782e51f2c6c9599c133c6098982a54c794358bf432529c"
 
-
+[[package]]
+name = "pairing-plus"
+version = "0.20.0"
+source = "git+https://github.com/algorand/pairing-plus?branch=master#7ec2ae03aae4ba2fc5210810211478171ccededf"
+dependencies = [
+ "byteorder",
+ "digest 0.8.1",
+ "ff-zeroize",
+ "rand 0.4.6",
+ "rand_core 0.5.1",
+ "rand_xorshift 0.2.0",
+ "zeroize",
+]
 
 [[package]]
 name = "pairing-plus"
