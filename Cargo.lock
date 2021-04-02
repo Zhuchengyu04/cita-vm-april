@@ -877,19 +877,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2839e79665f131bdb5782e51f2c6c9599c133c6098982a54c794358bf432529c"
 
-[[package]]
-name = "pairing-plus"
-version = "0.20.0"
-source = "git+https://github.com/algorand/pairing-plus?branch=master#7ec2ae03aae4ba2fc5210810211478171ccededf"
-dependencies = [
- "byteorder",
- "digest 0.8.1",
- "ff-zeroize",
- "rand 0.4.6",
- "rand_core 0.5.1",
- "rand_xorshift 0.2.0",
- "zeroize",
-]
+
 
 [[package]]
 name = "pairing-plus"
