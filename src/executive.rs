@@ -641,8 +641,8 @@ impl<B: DB + 'static> Executive<B> {
         )
     }
 
-    pub fn commit(&self,block_number: u64) -> Result<H256, err::Error> {
-        self.state_provider.borrow_mut().commit(block_number)?;
+    pub fn commit(&self) -> Result<H256, err::Error> {
+        self.state_provider.borrow_mut().commit()?;
         Ok(self.state_provider.borrow_mut().root)
     }
 }
